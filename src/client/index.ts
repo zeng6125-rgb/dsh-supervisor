@@ -132,14 +132,13 @@ var CSS = [
   // Head and footer are plain rows on the glass — the official menu surface has
   // no tinted bands, and a near-opaque header fill would slab over the blur.
   '.dsv-pop-head{display:flex;align-items:center;gap:8px;padding:10px 14px 4px;flex:none;}',
-  // Quick toggles: the two runtime switches people actually flip mid-work,
-  // without a detour to the settings page.
-  '.dsv-quick{display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1px solid rgba(0,0,0,.05);flex:none;}',
-  '.dsv-quick span{font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,#b0b0b0);}',
-  '.dsv-quick .dsv-quick-gap{flex:1 1 auto;}',
+  // Quick toggles ride inside the head row: they take the middle stretch so
+  // the ack button stays left and × remains the last element at the right edge.
+  '.dsv-quick{display:inline-flex;align-items:center;gap:8px;flex:1 1 auto;justify-content:center;}',
+  '.dsv-quick-label{font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,#b0b0b0);}',
   '.dsv-pop-title{font-size:13px;font-weight:600;letter-spacing:.02em;',
   'color:var(--dsw-alias-label-primary,#e6e6e6);}',
-  '.dsv-pop-head .dsv-btn{margin-left:auto;}',
+  '.dsv-pop-head .dsv-btn{margin-left:6px;}',
   '.dsv-pop-head .dsv-btn + .dsv-btn{margin-left:6px;}',
   // Plain list, host-native: no invented card backgrounds — items sit on the
   // panel floor and are separated by spacing alone; severity lives in the chip.
@@ -679,6 +678,26 @@ function Panel(props: any) {
             count > 0
               ? h('button', { className: 'dsv-btn', type: 'button', onClick: function () { ack() } }, '全部已读')
               : null,
+            // Quick toggles live INSIDE the head row (before ×): a separate row
+            // left a wide empty gap (title/ack left, switches pinned to both
+            // edges) and the user called the layout out twice.
+            h(
+              'div',
+              { className: 'dsv-quick' },
+              h('span', { className: 'dsv-quick-label' }, '启用'),
+              h('button', {
+                className: 'dsv-switch', type: 'button', role: 'switch',
+                'aria-checked': !!snapshot.enabled, 'aria-label': '启用审查员',
+                disabled: writing, onClick: function () { toggleConfig('enabled', !snapshot.enabled) },
+              }),
+              h('span', { className: 'dsv-quick-label' }, '先拦一次'),
+              h('button', {
+                className: 'dsv-switch', type: 'button', role: 'switch',
+                'aria-checked': !!snapshot.intercept, 'aria-label': '先拦一次',
+                disabled: writing, onClick: function () { toggleConfig('intercept', !snapshot.intercept) },
+              }),
+              error ? h('span', { className: 'dsv-err' }, error) : null,
+            ),
             h('button', { className: 'dsv-btn', type: 'button', 'data-x': '1', title: '收起', onClick: function () { requestClose() } },
               // A real stroke icon (lucide x), matching the host's close
               // glyphs — the old child was a literal × text character.
@@ -687,27 +706,6 @@ function Panel(props: any) {
                 stroke: 'currentColor', 'stroke-width': 2,
                 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true',
               }, h('path', { d: 'M18 6 6 18' }), h('path', { d: 'm6 6 12 12' }))),
-          ),
-          // Quick toggles: the two runtime switches people actually flip
-          // mid-work, without a detour to the settings page. Sibling of the
-          // head row — a stray child here would strand the × mid-row.
-          h(
-            'div',
-            { className: 'dsv-quick' },
-            h('span', null, '启用'),
-            h('button', {
-              className: 'dsv-switch', type: 'button', role: 'switch',
-              'aria-checked': !!snapshot.enabled, 'aria-label': '启用审查员',
-              disabled: writing, onClick: function () { toggleConfig('enabled', !snapshot.enabled) },
-            }),
-            h('span', { className: 'dsv-quick-gap' }),
-            h('span', null, '先拦一次'),
-            h('button', {
-              className: 'dsv-switch', type: 'button', role: 'switch',
-              'aria-checked': !!snapshot.intercept, 'aria-label': '先拦一次',
-              disabled: writing, onClick: function () { toggleConfig('intercept', !snapshot.intercept) },
-            }),
-            error ? h('span', { className: 'dsv-err' }, error) : null,
           ),
           h(
             'div',
