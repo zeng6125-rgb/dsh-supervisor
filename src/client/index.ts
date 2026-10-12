@@ -134,8 +134,8 @@ var CSS = [
   '.dsv-pop-head{display:flex;align-items:center;gap:8px;padding:10px 14px 4px;flex:none;}',
   // Quick toggles: the two runtime switches people actually flip mid-work,
   // without a detour to the settings page.
-  '.dsv-quick{display:flex;align-items:center;gap:8px;padding:6px 14px 8px;border-bottom:1px solid rgba(0,0,0,.05);flex:none;}',
-  '.dsv-quick span{font-size:12px;color:var(--dsw-alias-label-secondary,#b0b0b0);}',
+  '.dsv-quick{display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1px solid rgba(0,0,0,.05);flex:none;}',
+  '.dsv-quick span{font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,#b0b0b0);}',
   '.dsv-quick .dsv-quick-gap{flex:1 1 auto;}',
   '.dsv-pop-title{font-size:13px;font-weight:600;letter-spacing:.02em;',
   'color:var(--dsw-alias-label-primary,#e6e6e6);}',
