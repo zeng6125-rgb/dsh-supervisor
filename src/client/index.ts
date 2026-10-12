@@ -228,6 +228,14 @@ var CSS = [
   'transition:border-color .15s ease;}',
   '.dsv-ctl input[type="number"]{width:96px;}',
   '.dsv-ctl input[type="text"]{width:200px;}',
+  // Pickers wear the same hairline-box language as the text inputs.
+  '.dsv-select{height:32px;padding:0 10px;border-radius:8px;max-width:240px;',
+  'border:1px solid var(--dsw-alias-border-default,#d9d9d9);background:var(--dsw-alias-bg-layer-1,#ffffff);',
+  'color:var(--dsw-alias-label-primary,#0f1115);font-size:13px;outline:none;cursor:pointer;',
+  'transition:border-color .15s ease;}',
+  '.dsv-select:hover{border-color:var(--dsw-alias-label-tertiary,#8a8a8a);}',
+  '.dsv-select:focus{border-color:#316dca;}',
+  '.dsv-select:disabled{opacity:.5;cursor:default;}',
   '.dsv-ctl input[type="number"]:focus,.dsv-ctl input[type="text"]:focus{border-color:#316dca;}',
   // Toggle switch for booleans: a real switch reads as "setting". Animated
   // thumb, accent fill when on, stretch on press.
@@ -758,6 +766,7 @@ interface FieldSpec {
   hint: string
   toggle?: boolean
   text?: boolean
+  select?: 'provider' | 'model'
   ph?: string
   min?: number
   max?: number
@@ -776,8 +785,8 @@ var FIELDS: FieldSpec[] = [
   { key: 'fallbackProvider', label: '回退 provider', hint: '审查路由连续失败后切到这条路由；与回退 model 都填才启用。', text: true, ph: '留空 = 不启用' },
   { key: 'fallbackModel', label: '回退 model', hint: '与回退 provider 配套。留空则不启用回退，连续失败时面板会亮失明提醒。', text: true, ph: '留空 = 不启用' },
   { key: 'fallbackAfterErrors', label: '回退触发（连败次数）', hint: '连续多少次 transient 失败后切回退路由。', min: 1, max: 20 },
-  { key: 'reviewProvider', label: '审查 provider', hint: '固定审查模型：与审查 model 都填时，所有会话都用它做审查（默认留空 = 跟随各会话自己的模型）。', text: true, ph: '留空 = 跟随会话' },
-  { key: 'reviewModel', label: '审查 model', hint: '与审查 provider 配套。强主模型可能是弱审查员（契约遵守差），值得固定到一个守契约的模型。', text: true, ph: '留空 = 跟随会话' },
+  { key: 'reviewProvider', label: '审查 provider', hint: '固定审查模型：与审查 model 都选时，所有会话都用它做审查（留空 = 跟随各会话自己的模型）。', select: 'provider', ph: '跟随会话' },
+  { key: 'reviewModel', label: '审查 model', hint: '与审查 provider 配套。强主模型可能是弱审查员（契约遵守差），值得固定到一个守契约的模型。', select: 'model', ph: '跟随会话' },
   { key: 'maxDeltaMessages', label: '每次审查的消息数', hint: '送给审查员的增量转录上限（0 = 不限）。只送新增的消息。', min: 0, max: 500 },
   { key: 'maxNoteChars', label: '提醒长度上限', hint: '超长的提醒在送到主 agent 之前会被截断并加省略号。', min: 80, max: 4000 },
   { key: 'reviewMaxTokens', label: '审查回复预算', hint: '审查调用的 maxTokens。推理模型需要余量，否则会返回空正文。', min: 128, max: 8192 },
@@ -816,6 +825,13 @@ function ConfigCard(props: CardProps) {
   var liveRef = React.useState({} as Snapshot)
   var live = liveRef[0]
   var setLive = liveRef[1]
+  // Live provider/model directory for the two pickers (/models is served from
+  // inside the host, so it works without browser credentials).
+  var dirRef = React.useState({ providers: [] as any[], models: [] as any[] })
+  var dir = dirRef[0]
+  var setDir = dirRef[1]
+  var providers = dir.providers
+  var models = dir.models
   var titleOfSession = useTitles(props)
 
   React.useEffect(function () {
@@ -841,6 +857,12 @@ function ConfigCard(props: CardProps) {
           } else if (!cancelled) setLoadErr('配置读取失败。')
         })
         .catch(function () { if (!cancelled) setLoadErr('配置读取失败。') })
+      fetch(API + '/models', { cache: 'no-store' })
+        .then(function (r) { return r.json() })
+        .then(function (body) {
+          if (!cancelled && body && body.ok) setDir({ providers: body.providers || [], models: body.models || [] })
+        })
+        .catch(function () { /* pickers keep their empty option */ })
     }
     pull()
     var timer = setInterval(pull, POLL_MS)
@@ -905,6 +927,7 @@ function ConfigCard(props: CardProps) {
   var GROUPS: Array<{ title: string; keys: string[] }> = [
     { title: '运行', keys: ['enabled', 'stepsBetweenReviews', 'intercept'] },
     { title: '审查门', keys: ['jevGate', 'gateSkipClear'] },
+    { title: '审查模型', keys: ['reviewProvider', 'reviewModel'] },
     { title: '回退路由', keys: ['fallbackProvider', 'fallbackModel', 'fallbackAfterErrors'] },
     { title: '增量与预算', keys: ['maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens'] },
   ]
@@ -913,26 +936,72 @@ function ConfigCard(props: CardProps) {
       .map(function (key) { return FIELDS.find(function (f: FieldSpec) { return f.key === key }) })
       .filter(function (f): f is FieldSpec { return !!f })
       .map(function (f: FieldSpec) {
-        var control = f.toggle
-          ? h('button', {
-              type: 'button',
-              role: 'switch',
-              'aria-checked': !!current(f.key),
+        var control: any
+        if (f.toggle) {
+          control = h('button', {
+            type: 'button',
+            role: 'switch',
+            'aria-checked': !!current(f.key),
+            'aria-label': f.label,
+            className: 'dsv-switch',
+            disabled: !writable || busy,
+            onClick: function () { edit(f.key, !current(f.key)) },
+          })
+        } else if (f.select === 'provider') {
+          // Provider picker: an explicit "follow the session" empty option plus
+          // the live directory. Changing it clears a model that no longer
+          // belongs to the chosen provider.
+          control = h(
+            'select',
+            {
+              className: 'dsv-select',
+              value: String(current(f.key) ?? ''),
               'aria-label': f.label,
-              className: 'dsv-switch',
               disabled: !writable || busy,
-              onClick: function () { edit(f.key, !current(f.key)) },
-            })
-          : h('input', {
-              type: f.text ? 'text' : 'number',
-              value: current(f.key) as any,
-              min: f.min,
-              max: f.max,
-              placeholder: f.ph,
+              onChange: function (e: any) {
+                var next = e.target.value
+                edit(f.key, next)
+                var other = 'reviewModel'
+                if (next && String(current(other) ?? '') && !models.some(function (m: any) { return m.provider === next && m.id === current(other) })) edit(other, '')
+              },
+            },
+            h('option', { value: '' }, f.ph || '跟随会话'),
+            providers.map(function (p: any) { return h('option', { value: p.id, key: p.id }, p.name || p.id) }),
+          )
+        } else if (f.select === 'model') {
+          // Model picker scoped to the selected provider; an out-of-list value
+          // (hand-typed earlier, or provider not yet chosen) stays visible.
+          var providerValue = String(current(f.key === 'reviewModel' ? 'reviewProvider' : 'fallbackProvider') ?? '')
+          var list = models.filter(function (m: any) { return !providerValue || m.provider === providerValue })
+          var currentModel = String(current(f.key) ?? '')
+          var extra = currentModel && !list.some(function (m: any) { return m.id === currentModel })
+            ? [h('option', { value: currentModel, key: 'current' }, currentModel + '（当前值）')]
+            : []
+          control = h(
+            'select',
+            {
+              className: 'dsv-select',
+              value: currentModel,
               'aria-label': f.label,
               disabled: !writable || busy,
               onChange: function (e: any) { edit(f.key, e.target.value) },
-            })
+            },
+            h('option', { value: '' }, f.ph || '跟随会话'),
+            extra,
+            list.map(function (m: any) { return h('option', { value: m.id, key: m.provider + '/' + m.id }, m.name || m.id) }),
+          )
+        } else {
+          control = h('input', {
+            type: f.text ? 'text' : 'number',
+            value: current(f.key) as any,
+            min: f.min,
+            max: f.max,
+            placeholder: f.ph,
+            'aria-label': f.label,
+            disabled: !writable || busy,
+            onChange: function (e: any) { edit(f.key, e.target.value) },
+          })
+        }
         return h(
           'div',
           { className: 'dsv-row', key: f.key },

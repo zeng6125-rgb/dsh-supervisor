@@ -456,7 +456,7 @@ export function apply(ctx0: Context, config?: unknown): void {
       const unregister = ctx.webServer?.register({
         kind: 'prefix',
         path: API,
-        handler: (req: any, res: any) => {
+        handler: async (req: any, res: any) => {
           const url: string = req?.url || '/'
           const pathname = url.split('?')[0]
           const query = url.slice(pathname.length)
@@ -521,6 +521,20 @@ export function apply(ctx0: Context, config?: unknown): void {
                   reviewModel: cfg.reviewModel,
                 },
               }
+            } else if (sub === '/models') {
+              // Provider/model directory for the settings page's review-model
+              // picker, read from the live llm service inside the host (the
+              // browser's own /api/modelCatalog needs credentials we never see).
+              const llm = (ctx0 as any)?.llm
+              const providers: Array<{ id: string; name: string }> = llm?.listProviders ? llm.listProviders() : []
+              const models: Array<{ provider: string; id: string; name: string }> = []
+              for (const p of providers) {
+                try {
+                  const list = (await llm.listModels(p.id)) as Array<{ id: string; name?: string }>
+                  for (const m of list ?? []) models.push({ provider: p.id, id: m.id, name: m.name || m.id })
+                } catch { /* a provider with no reachable catalog simply offers nothing */ }
+              }
+              payload = { ok: true, providers: providers.map((p) => ({ id: p.id, name: p.name || p.id })), models }
             } else if (sub === '/ack') {
               const id = /[?&]id=([^&]+)/.exec(query)?.[1]
               payload = { ok: true, acked: state.ack(id ? decodeURIComponent(id) : undefined) }
@@ -548,6 +562,7 @@ export function apply(ctx0: Context, config?: unknown): void {
                 endpoints: [
                   '/state — alerts + per-session reviewer state',
                   '/config — current settings values (GET) / set one value (POST {key, value})',
+                  '/models — live provider/model directory for the settings pickers',
                   '/ack[?id=] — mark alert(s) read',
                   '/demo[?severity=blocker][&held=1][&note=…] — record a synthetic alert (UI check)',
                 ],
