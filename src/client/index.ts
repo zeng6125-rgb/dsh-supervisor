@@ -687,6 +687,10 @@ function Panel(props: any) {
                 stroke: 'currentColor', 'stroke-width': 2,
                 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true',
               }, h('path', { d: 'M18 6 6 18' }), h('path', { d: 'm6 6 12 12' }))),
+          ),
+          // Quick toggles: the two runtime switches people actually flip
+          // mid-work, without a detour to the settings page. Sibling of the
+          // head row — a stray child here would strand the × mid-row.
           h(
             'div',
             { className: 'dsv-quick' },
@@ -704,7 +708,6 @@ function Panel(props: any) {
               disabled: writing, onClick: function () { toggleConfig('intercept', !snapshot.intercept) },
             }),
             error ? h('span', { className: 'dsv-err' }, error) : null,
-          ),
           ),
           h(
             'div',
