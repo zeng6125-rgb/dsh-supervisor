@@ -78,6 +78,8 @@ function signature(cfg: Config): string {
     cfg.fallbackProvider,
     cfg.fallbackModel,
     cfg.fallbackAfterErrors,
+    cfg.reviewProvider,
+    cfg.reviewModel,
   ].join('\u0000')
 }
 
@@ -99,6 +101,8 @@ const CONFIG_VALUE_KINDS: Record<string, 'boolean' | 'number' | 'string'> = {
   fallbackProvider: 'string',
   fallbackModel: 'string',
   fallbackAfterErrors: 'number',
+  reviewProvider: 'string',
+  reviewModel: 'string',
 }
 
 function findOwnEntry(editor: any): any {
@@ -219,6 +223,13 @@ export function apply(ctx0: Context, config?: unknown): void {
       getFallback: () =>
         cfg.fallbackProvider && cfg.fallbackModel
           ? { provider: cfg.fallbackProvider, model: cfg.fallbackModel, afterErrors: cfg.fallbackAfterErrors }
+          : undefined,
+      // Optional pin: when both are set, every session reviews on this model
+      // instead of following its own route. Live-read so the settings page can
+      // pin or unpin mid-session.
+      getReviewRoute: () =>
+        cfg.reviewProvider && cfg.reviewModel
+          ? { provider: cfg.reviewProvider, model: cfg.reviewModel }
           : undefined,
       onFallback: (route) => {
         state.setSession(sessionId, { fallback: route })
@@ -400,7 +411,11 @@ export function apply(ctx0: Context, config?: unknown): void {
             const route = { provider, model }
             routes.set(sessionId, route)
             ensureReviewer(sessionId)?.setRoute(route)
-            state.setSession(sessionId, { route })
+            // The ledger records the route the review actually ran on: the
+            // override when pinned, otherwise the session's own model. That
+            // keeps parseFailsByRoute attributed to the reviewing model.
+            const pinned = cfg.reviewProvider && cfg.reviewModel
+            state.setSession(sessionId, { route: pinned ? { provider: cfg.reviewProvider, model: cfg.reviewModel } : route })
           }
         }
       } catch (error) {
@@ -502,6 +517,8 @@ export function apply(ctx0: Context, config?: unknown): void {
                   fallbackProvider: cfg.fallbackProvider,
                   fallbackModel: cfg.fallbackModel,
                   fallbackAfterErrors: cfg.fallbackAfterErrors,
+                  reviewProvider: cfg.reviewProvider,
+                  reviewModel: cfg.reviewModel,
                 },
               }
             } else if (sub === '/ack') {

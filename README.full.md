@@ -43,6 +43,7 @@ step/end × N → delta → ① jev 检测门 → ② LLM 审查 → ③ 解析 
 | `gateSkipClear` | `false` | 省钱模式：门判全清跳过模型调用（准确性优先，默认关闭以度量误放） |
 | `fallbackProvider` / `fallbackModel` | `''` | 回退审查路由；都填才启用 |
 | `fallbackAfterErrors` | `3` | 连续多少次 transient 失败后切回退 |
+| `reviewProvider` / `reviewModel` | `''` | **审查模型固定**（可选）：都填时所有会话都用它审查，不再跟随会话；默认空 = 跟随各会话自己的模型 |
 | `maxDeltaMessages` | `60` | 单次审查的增量消息上限（0 = 不限） |
 | `maxNoteChars` | `600` | 提醒正文上限，超长截断 |
 | `reviewMaxTokens` | `2048` | 审查调用 maxTokens（推理模型需余量） |

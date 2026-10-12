@@ -77,6 +77,12 @@ export interface ReviewerOptions {
    * settings page can arm or change it mid-session.
    */
   readonly getFallback?: () => { readonly provider: string; readonly model: string; readonly afterErrors: number } | undefined
+  /**
+   * Optional review-model override, highest route precedence. Default (empty
+   * provider/model) is undefined here and the reviewer follows the session's
+   * own route. Live-read so the settings page can pin or unpin mid-session.
+   */
+  readonly getReviewRoute?: () => { readonly provider: string; readonly model: string } | undefined
   /** Fired once per switch to the fallback route, for the ledger and the panel. */
   readonly onFallback?: (route: ReviewerRoute) => void
   /** Fired once per blind episode: the review route failed `afterErrors` times
@@ -371,8 +377,17 @@ export class Reviewer {
     this.options.onOutcome?.(outcome, reply, reason)
   }
 
-  /** The session's own route, or the configured fallback once switched over. */
+  /**
+   * Route precedence, highest first: the configured review-model override →
+   * the fallback route (after repeated failures) → the session's own route.
+   * The override outranks the fallback because it is an explicit "always
+   * review with this model" — a dead override still beats a live session route
+   * only in the sense that the override is what the user asked for; failures
+   * on it are reported, not silently retried on the session route.
+   */
   private effectiveRoute(): ReviewerRoute | undefined {
+    const override = this.options.getReviewRoute?.()
+    if (override && override.provider && override.model) return { provider: override.provider, model: override.model }
     if (!this.usingFallback) return this.route
     const fb = this.options.getFallback?.()
     if (fb && fb.provider && fb.model) return { provider: fb.provider, model: fb.model }

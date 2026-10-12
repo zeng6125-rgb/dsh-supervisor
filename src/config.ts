@@ -20,6 +20,16 @@ export interface Config {
   fallbackProvider: string
   fallbackModel: string
   fallbackAfterErrors: number
+  /**
+   * Optional review-model override. Empty strings (the default) keep the
+   * reviewer on the session's own route — each session reviews with whatever
+   * model its main agent uses. Fill both to pin the reviewer to one model
+   * across all sessions: live data shows a strong main-agent model can be a
+   * contract-breaking reviewer (hy3/step-5-preview: 7/7 no_frame), and the
+   * two roles reward different models.
+   */
+  reviewProvider: string
+  reviewModel: string
 }
 
 /**
@@ -40,6 +50,8 @@ export const Config = z.object({
   fallbackProvider: z.string().default('').volatile(),
   fallbackModel: z.string().default('').volatile(),
   fallbackAfterErrors: z.number().min(1).max(20).default(3).volatile(),
+  reviewProvider: z.string().default('').volatile(),
+  reviewModel: z.string().default('').volatile(),
 })
 
 const DEFAULTS: Required<Config> = {
@@ -63,6 +75,9 @@ const DEFAULTS: Required<Config> = {
   fallbackProvider: '',
   fallbackModel: '',
   fallbackAfterErrors: 3,
+  // Follow the session's own model by default; the override is opt-in.
+  reviewProvider: '',
+  reviewModel: '',
 }
 
 /**
@@ -115,5 +130,7 @@ export function resolveConfig(raw: unknown): Required<Config> {
     fallbackProvider: str(source.fallbackProvider, DEFAULTS.fallbackProvider),
     fallbackModel: str(source.fallbackModel, DEFAULTS.fallbackModel),
     fallbackAfterErrors: num(source.fallbackAfterErrors, DEFAULTS.fallbackAfterErrors, 1),
+    reviewProvider: str(source.reviewProvider, DEFAULTS.reviewProvider),
+    reviewModel: str(source.reviewModel, DEFAULTS.reviewModel),
   }
 }

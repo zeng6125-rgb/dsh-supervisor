@@ -776,6 +776,8 @@ var FIELDS: FieldSpec[] = [
   { key: 'fallbackProvider', label: '回退 provider', hint: '审查路由连续失败后切到这条路由；与回退 model 都填才启用。', text: true, ph: '留空 = 不启用' },
   { key: 'fallbackModel', label: '回退 model', hint: '与回退 provider 配套。留空则不启用回退，连续失败时面板会亮失明提醒。', text: true, ph: '留空 = 不启用' },
   { key: 'fallbackAfterErrors', label: '回退触发（连败次数）', hint: '连续多少次 transient 失败后切回退路由。', min: 1, max: 20 },
+  { key: 'reviewProvider', label: '审查 provider', hint: '固定审查模型：与审查 model 都填时，所有会话都用它做审查（默认留空 = 跟随各会话自己的模型）。', text: true, ph: '留空 = 跟随会话' },
+  { key: 'reviewModel', label: '审查 model', hint: '与审查 provider 配套。强主模型可能是弱审查员（契约遵守差），值得固定到一个守契约的模型。', text: true, ph: '留空 = 跟随会话' },
   { key: 'maxDeltaMessages', label: '每次审查的消息数', hint: '送给审查员的增量转录上限（0 = 不限）。只送新增的消息。', min: 0, max: 500 },
   { key: 'maxNoteChars', label: '提醒长度上限', hint: '超长的提醒在送到主 agent 之前会被截断并加省略号。', min: 80, max: 4000 },
   { key: 'reviewMaxTokens', label: '审查回复预算', hint: '审查调用的 maxTokens。推理模型需要余量，否则会返回空正文。', min: 128, max: 8192 },

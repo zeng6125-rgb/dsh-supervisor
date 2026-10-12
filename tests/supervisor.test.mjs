@@ -131,6 +131,8 @@ test('resolveConfig unwraps volatile references', () => {
     fallbackProvider: volatile('hy3'),
     fallbackModel: volatile('qwen3.6'),
     fallbackAfterErrors: volatile(5),
+    reviewProvider: volatile('qwen'),
+    reviewModel: volatile('qwen3.8-max'),
   })
   assert.deepEqual(cfg, {
     enabled: false,
@@ -144,6 +146,8 @@ test('resolveConfig unwraps volatile references', () => {
     fallbackProvider: 'hy3',
     fallbackModel: 'qwen3.6',
     fallbackAfterErrors: 5,
+    reviewProvider: 'qwen',
+    reviewModel: 'qwen3.8-max',
   })
 })
 
@@ -1186,14 +1190,22 @@ test('counters survive a restart through the persisted state file', async () => 
     first.recordReview('s1', 'note')
     first.recordGate('s1', 'cleared')
     first.recordGate('s1', 'false_clear')
+    first.setSession('s1', { route: { provider: 'qwen', model: 'qwen3-max' } })
+    first.recordReview('s1', 'unparseable', 'prose forever', 'no_frame')
     first.flush()
 
     const second = new SupervisorState(path)
     second.bump('s1', 'steps', 1)
     const totals = second.totals()
     assert.equal(totals.steps, 8, 'restored steps plus new ones')
-    assert.equal(totals.reviews, 1)
+    assert.equal(totals.reviews, 2)
     assert.deepEqual(totals.gate, { cleared: 1, falseClears: 1, flagged: 0, confirmed: 0 })
+    assert.deepEqual(totals.parseFails, { no_frame: 1 })
+    assert.deepEqual(
+      totals.parseFailsByRoute,
+      { 'qwen/qwen3-max': { no_frame: 1 } },
+      'parse fails are attributed to the route the session reviewed on',
+    )
   } finally {
     rmSync(path, { force: true })
   }

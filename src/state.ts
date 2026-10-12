@@ -60,6 +60,7 @@ interface PersistedSession {
   steps: number
   reviews: number
   outcomes: Record<string, number>
+  route?: { provider: string; model: string }
   parseFails?: Record<string, number>
   gate?: { cleared: number; falseClears: number; flagged?: number; confirmed?: number }
 }
@@ -92,6 +93,7 @@ export class SupervisorState {
           steps: saved.steps ?? 0,
           reviews: saved.reviews ?? 0,
           outcomes: saved.outcomes ?? {},
+          ...(saved.route ? { route: { ...saved.route } } : {}),
           ...(saved.parseFails ? { parseFails: { ...saved.parseFails } } : {}),
           ...(saved.gate
             ? {
@@ -233,10 +235,15 @@ export class SupervisorState {
     unhealthy: number
     outcomes: Record<string, number>
     parseFails: Record<string, number>
+    /** parseFails keyed by `provider/model`, so a contract-breaking route is
+     *  visible instead of hiding inside the global average. Sessions restored
+     *  from before route persistence land under `unknown`. */
+    parseFailsByRoute: Record<string, Record<string, number>>
     gate: { cleared: number; falseClears: number; flagged: number; confirmed: number }
   } {
     const outcomes: Record<string, number> = {}
     const parseFails: Record<string, number> = {}
+    const parseFailsByRoute: Record<string, Record<string, number>> = {}
     const gate = { cleared: 0, falseClears: 0, flagged: 0, confirmed: 0 }
     let steps = 0
     let reviews = 0
@@ -252,6 +259,9 @@ export class SupervisorState {
       }
       for (const [reason, count] of Object.entries(session.parseFails ?? {})) {
         parseFails[reason] = (parseFails[reason] ?? 0) + count
+        const route = session.route ? `${session.route.provider}/${session.route.model}` : 'unknown'
+        const bucket = (parseFailsByRoute[route] ??= {})
+        bucket[reason] = (bucket[reason] ?? 0) + count
       }
     }
     const unhealthy = UNHEALTHY_OUTCOMES.reduce((sum, outcome) => sum + (outcomes[outcome] ?? 0), 0)
@@ -263,6 +273,7 @@ export class SupervisorState {
       unhealthy,
       outcomes,
       parseFails,
+      parseFailsByRoute,
       gate,
     }
   }
@@ -291,6 +302,7 @@ export class SupervisorState {
         steps: session.steps,
         reviews: session.reviews,
         outcomes: { ...session.outcomes },
+        ...(session.route ? { route: { ...session.route } } : {}),
         ...(session.parseFails ? { parseFails: { ...session.parseFails } } : {}),
         ...(session.gate ? { gate: { ...session.gate } } : {}),
       }
