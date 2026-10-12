@@ -134,7 +134,7 @@ var CSS = [
   '.dsv-pop-head{display:flex;align-items:center;gap:8px;padding:10px 14px 4px;flex:none;}',
   // Quick toggles ride inside the head row: they take the middle stretch so
   // the ack button stays left and × remains the last element at the right edge.
-  '.dsv-quick{display:inline-flex;align-items:center;gap:8px;flex:1 1 auto;justify-content:center;}',
+  '.dsv-quick{display:inline-flex;align-items:center;gap:8px;flex:1 1 auto;justify-content:center;border:0;padding:0;}',
   '.dsv-quick-label{font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,#b0b0b0);}',
   '.dsv-pop-title{font-size:13px;font-weight:600;letter-spacing:.02em;',
   'color:var(--dsw-alias-label-primary,#e6e6e6);}',
@@ -179,6 +179,7 @@ var CSS = [
   '.dsv-btn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06));',
   'color:var(--dsw-alias-label-primary,#e6e6e6);}',
   '.dsv-btn:active{background:var(--dsw-alias-interactive-bg-hover,var(--dsw-alias-interactive-bg-hover-solid,rgba(128,128,128,.24)));transform:scale(.97);}',
+  '.dsv-btn:disabled{opacity:.45;cursor:default;}',
   '.dsv-btn:focus-visible{outline:1px solid var(--dsw-alias-border-l3,#666);outline-offset:1px;}',
   '.dsv-btn:disabled{opacity:.45;cursor:default;}',
   '.dsv-btn:disabled:hover{background:transparent;color:var(--dsw-alias-label-secondary,#b0b0b0);transform:none;}',
@@ -695,9 +696,9 @@ function Panel(props: any) {
               }),
               error ? h('span', { className: 'dsv-err' }, error) : null,
             ),
-            count > 0
-              ? h('button', { className: 'dsv-btn', type: 'button', onClick: function () { ack() } }, '全部已读')
-              : null,
+            // Always rendered (disabled when nothing is unread): a button that
+            // unmounts on ack would make the centred switches jump sideways.
+            h('button', { className: 'dsv-btn', type: 'button', disabled: count === 0, onClick: function () { ack() } }, '全部已读'),
             h('button', { className: 'dsv-btn', type: 'button', 'data-x': '1', title: '收起', onClick: function () { requestClose() } },
               // A real stroke icon (lucide x), matching the host's close
               // glyphs — the old child was a literal × text character.
