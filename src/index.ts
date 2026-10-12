@@ -89,7 +89,7 @@ function signature(cfg: Config): string {
  * the configEditor service — the same Loader path the host form uses, which
  * means `loader/volatile-update` fires and `cfg` re-resolves live.
  */
-const CONFIG_VALUE_KINDS: Record<string, 'boolean' | 'number' | 'string'> = {
+const CONFIG_VALUE_KINDS: Record<string, 'boolean' | 'number' | 'string' | 'route'> = {
   enabled: 'boolean',
   stepsBetweenReviews: 'number',
   intercept: 'boolean',
@@ -98,11 +98,16 @@ const CONFIG_VALUE_KINDS: Record<string, 'boolean' | 'number' | 'string'> = {
   reviewMaxTokens: 'number',
   jevGate: 'boolean',
   gateSkipClear: 'boolean',
-  fallbackProvider: 'string',
-  fallbackModel: 'string',
+  // Combined route pickers: one dropdown writes provider+model atomically.
+  reviewRoute: 'route',
+  fallbackRoute: 'route',
   fallbackAfterErrors: 'number',
-  reviewProvider: 'string',
-  reviewModel: 'string',
+}
+
+/** Route keys a combined picker writes, and the config fields they map to. */
+const ROUTE_KEYS: Record<string, [string, string]> = {
+  reviewRoute: ['reviewProvider', 'reviewModel'],
+  fallbackRoute: ['fallbackProvider', 'fallbackModel'],
 }
 
 function findOwnEntry(editor: any): any {
@@ -126,7 +131,17 @@ async function writeConfigValue(ctx0: any, key: unknown, value: unknown): Promis
   if (!entry) return { ok: false, error: 'Config 服务里没有本插件的条目' }
   await editor.edit(entry, (current: Record<string, unknown>) => {
     const next = { ...(current ?? {}) }
-    if (kind === 'string' && coerced === '') delete next[key]
+    if (kind === 'route') {
+      // `provider\u0000model` → the two raw fields; empty side unsets it.
+      const [providerField, modelField] = ROUTE_KEYS[key]
+      const [provider, model] = String(coerced).split('\u0000')
+      if (provider) next[providerField] = provider
+      else delete next[providerField]
+      if (model) next[modelField] = model
+      else delete next[modelField]
+      return next
+    }
+    if (coerced === '') delete next[key]
     else next[key] = coerced
     return next
   })
@@ -514,11 +529,11 @@ export function apply(ctx0: Context, config?: unknown): void {
                   reviewMaxTokens: cfg.reviewMaxTokens,
                   jevGate: cfg.jevGate,
                   gateSkipClear: cfg.gateSkipClear,
-                  fallbackProvider: cfg.fallbackProvider,
-                  fallbackModel: cfg.fallbackModel,
+                  // Combined route pickers (`provider\u0000model`), the shape
+                  // the settings page's single dropdowns read and write.
+                  reviewRoute: cfg.reviewProvider + '\u0000' + cfg.reviewModel,
+                  fallbackRoute: cfg.fallbackProvider + '\u0000' + cfg.fallbackModel,
                   fallbackAfterErrors: cfg.fallbackAfterErrors,
-                  reviewProvider: cfg.reviewProvider,
-                  reviewModel: cfg.reviewModel,
                 },
               }
             } else if (sub === '/models') {

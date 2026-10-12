@@ -766,7 +766,7 @@ interface FieldSpec {
   hint: string
   toggle?: boolean
   text?: boolean
-  select?: 'provider' | 'model'
+  select?: 'route'
   ph?: string
   min?: number
   max?: number
@@ -782,11 +782,9 @@ var FIELDS: FieldSpec[] = [
   { key: 'intercept', label: '先拦一次', hint: '有提醒时先拦住下一步，请主 agent 处理；再下一步照常放行并附上问题。', toggle: true },
   { key: 'jevGate', label: 'jev 检测门', hint: '审查前先过一道 jev 快筛：命中的类别作为线索拼进审查提示词。', toggle: true },
   { key: 'gateSkipClear', label: '门清即跳过（省钱模式）', hint: '默认关闭：门判全清也照审，误放可度量。开启后全清的 delta 跳过模型调用。', toggle: true },
-  { key: 'fallbackProvider', label: '回退 provider', hint: '审查路由连续失败后切到这条路由；与回退 model 都填才启用。', text: true, ph: '留空 = 不启用' },
-  { key: 'fallbackModel', label: '回退 model', hint: '与回退 provider 配套。留空则不启用回退，连续失败时面板会亮失明提醒。', text: true, ph: '留空 = 不启用' },
+  { key: 'fallbackRoute', label: '回退路由', hint: '审查路由连续失败后切到这条路由；留空则不启用回退，连续失败时面板会亮失明提醒。', select: 'route', ph: '不启用' },
   { key: 'fallbackAfterErrors', label: '回退触发（连败次数）', hint: '连续多少次 transient 失败后切回退路由。', min: 1, max: 20 },
-  { key: 'reviewProvider', label: '审查 provider', hint: '固定审查模型：与审查 model 都选时，所有会话都用它做审查（留空 = 跟随各会话自己的模型）。', select: 'provider', ph: '跟随会话' },
-  { key: 'reviewModel', label: '审查 model', hint: '与审查 provider 配套。强主模型可能是弱审查员（契约遵守差），值得固定到一个守契约的模型。', select: 'model', ph: '跟随会话' },
+  { key: 'reviewRoute', label: '审查模型', hint: '固定审查模型：选定后所有会话都用它审查；留空 = 跟随各会话自己的模型。强主模型可能是弱审查员（契约遵守差）。', select: 'route', ph: '跟随会话' },
   { key: 'maxDeltaMessages', label: '每次审查的消息数', hint: '送给审查员的增量转录上限（0 = 不限）。只送新增的消息。', min: 0, max: 500 },
   { key: 'maxNoteChars', label: '提醒长度上限', hint: '超长的提醒在送到主 agent 之前会被截断并加省略号。', min: 80, max: 4000 },
   { key: 'reviewMaxTokens', label: '审查回复预算', hint: '审查调用的 maxTokens。推理模型需要余量，否则会返回空正文。', min: 128, max: 8192 },
@@ -927,8 +925,8 @@ function ConfigCard(props: CardProps) {
   var GROUPS: Array<{ title: string; keys: string[] }> = [
     { title: '运行', keys: ['enabled', 'stepsBetweenReviews', 'intercept'] },
     { title: '审查门', keys: ['jevGate', 'gateSkipClear'] },
-    { title: '审查模型', keys: ['reviewProvider', 'reviewModel'] },
-    { title: '回退路由', keys: ['fallbackProvider', 'fallbackModel', 'fallbackAfterErrors'] },
+    { title: '审查模型', keys: ['reviewRoute'] },
+    { title: '故障回退', keys: ['fallbackRoute', 'fallbackAfterErrors'] },
     { title: '增量与预算', keys: ['maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens'] },
   ]
   var rows = GROUPS.map(function (g: { title: string; keys: string[] }) {
@@ -947,48 +945,46 @@ function ConfigCard(props: CardProps) {
             disabled: !writable || busy,
             onClick: function () { edit(f.key, !current(f.key)) },
           })
-        } else if (f.select === 'provider') {
-          // Provider picker: an explicit "follow the session" empty option plus
-          // the live directory. Changing it clears a model that no longer
-          // belongs to the chosen provider.
+        } else if (f.select === 'route') {
+          // One picker per route: value is `provider\u0000model` (either side may
+          // be empty while the other is set). Options are `provider · model`,
+          // so a single dropdown replaces the old two-field pair.
+          var ROUTE_SEP = '\u0000'
+          var cur = String(current(f.key) ?? '')
+          var parts = cur.split(ROUTE_SEP)
+          var curP = parts[0] || ''
+          var curM = parts[1] || ''
+          var opts: any[] = [h('option', { value: '', key: 'none' }, f.ph || '跟随会话')]
+          var seen: Record<string, boolean> = {}
+          if (curP && !providers.some(function (p: any) { return p.id === curP })) {
+            opts.push(h('option', { value: curP + ROUTE_SEP + curM, key: 'cur' }, (curP || '?') + ' · ' + (curM || '?') + '（当前值）'))
+            seen[curP + ROUTE_SEP + curM] = true
+          }
+          for (var p of providers) {
+            var pms = models.filter(function (m: any) { return m.provider === p.id })
+            if (pms.length === 0) {
+              var k0 = p.id + ROUTE_SEP
+              if (!seen[k0]) { seen[k0] = true; opts.push(h('option', { value: k0, key: k0 }, (p.name || p.id) + ' · （默认模型）')) }
+              continue
+            }
+            for (var m of pms) {
+              var k = p.id + ROUTE_SEP + m.id
+              if (seen[k]) continue
+              seen[k] = true
+              var label = (p.name || p.id) + ' · ' + (m.name || m.id)
+              opts.push(h('option', { value: k, key: k }, label))
+            }
+          }
           control = h(
             'select',
             {
               className: 'dsv-select',
-              value: String(current(f.key) ?? ''),
-              'aria-label': f.label,
-              disabled: !writable || busy,
-              onChange: function (e: any) {
-                var next = e.target.value
-                edit(f.key, next)
-                var other = 'reviewModel'
-                if (next && String(current(other) ?? '') && !models.some(function (m: any) { return m.provider === next && m.id === current(other) })) edit(other, '')
-              },
-            },
-            h('option', { value: '' }, f.ph || '跟随会话'),
-            providers.map(function (p: any) { return h('option', { value: p.id, key: p.id }, p.name || p.id) }),
-          )
-        } else if (f.select === 'model') {
-          // Model picker scoped to the selected provider; an out-of-list value
-          // (hand-typed earlier, or provider not yet chosen) stays visible.
-          var providerValue = String(current(f.key === 'reviewModel' ? 'reviewProvider' : 'fallbackProvider') ?? '')
-          var list = models.filter(function (m: any) { return !providerValue || m.provider === providerValue })
-          var currentModel = String(current(f.key) ?? '')
-          var extra = currentModel && !list.some(function (m: any) { return m.id === currentModel })
-            ? [h('option', { value: currentModel, key: 'current' }, currentModel + '（当前值）')]
-            : []
-          control = h(
-            'select',
-            {
-              className: 'dsv-select',
-              value: currentModel,
+              value: cur,
               'aria-label': f.label,
               disabled: !writable || busy,
               onChange: function (e: any) { edit(f.key, e.target.value) },
             },
-            h('option', { value: '' }, f.ph || '跟随会话'),
-            extra,
-            list.map(function (m: any) { return h('option', { value: m.id, key: m.provider + '/' + m.id }, m.name || m.id) }),
+            opts,
           )
         } else {
           control = h('input', {
