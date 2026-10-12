@@ -675,12 +675,9 @@ function Panel(props: any) {
             'div',
             { className: 'dsv-pop-head' },
             h('span', { className: 'dsv-pop-title' }, '审查提醒'),
-            count > 0
-              ? h('button', { className: 'dsv-btn', type: 'button', onClick: function () { ack() } }, '全部已读')
-              : null,
-            // Quick toggles live INSIDE the head row (before ×): a separate row
-            // left a wide empty gap (title/ack left, switches pinned to both
-            // edges) and the user called the layout out twice.
+            // Quick toggles live INSIDE the head row (right after the title):
+            // a separate row left a wide empty gap (title/ack left, switches
+            // pinned to both edges) and the user called the layout out twice.
             h(
               'div',
               { className: 'dsv-quick' },
@@ -698,6 +695,9 @@ function Panel(props: any) {
               }),
               error ? h('span', { className: 'dsv-err' }, error) : null,
             ),
+            count > 0
+              ? h('button', { className: 'dsv-btn', type: 'button', onClick: function () { ack() } }, '全部已读')
+              : null,
             h('button', { className: 'dsv-btn', type: 'button', 'data-x': '1', title: '收起', onClick: function () { requestClose() } },
               // A real stroke icon (lucide x), matching the host's close
               // glyphs — the old child was a literal × text character.
