@@ -39,7 +39,12 @@ function truncate(text: string, max: number): string {
   return flat.length <= max ? flat : flat.slice(0, max - 1) + '…'
 }
 
-/** Content blocks → one line of markdown. Reasoning is deliberately excluded. */
+/** Content blocks → one line of markdown. Reasoning is deliberately excluded.
+ *
+ *  Images are NOT rendered here, and that is measured, not an oversight: the
+ *  session/event feed carries only text and tool-call blocks — GUI-attached
+ *  images travel in the model request (see `agent/request` capture in
+ *  index.ts), never in the persisted event stream. */
 function renderContent(content: unknown): string {
   if (!Array.isArray(content)) return ''
   const parts: string[] = []
@@ -52,6 +57,9 @@ function renderContent(content: unknown): string {
     } else if (type === 'tool-call') {
       const { name, arguments: args } = block as { name?: string; arguments?: string }
       parts.push(`[calls ${String(name ?? '?')} ${truncate(String(args ?? ''), 240)}]`)
+    } else if (type === 'file') {
+      const attachment = (block as { attachment?: { name?: string } }).attachment
+      parts.push(`[file: ${attachment?.name || 'attachment'}]`)
     }
   }
   return parts.join(' ')
@@ -164,6 +172,19 @@ export class SessionTranscript {
 
     this.options.logger?.debug?.('transcript delta ready', { sessionId, steps, lines: lines.length })
     this.options.onDelta(sessionId, { markdown, steps })
+  }
+
+  /**
+   * Record lines discovered outside the event feed. The session/event stream
+   * carries no image blocks (measured: GUI-attached images travel only in the
+   * model request), so the `agent/request` capture reports them here — a
+   * reviewer that never learns about an attached screenshot reads the turn as
+   * if the user said nothing.
+   */
+  noteLines(sessionId: string, lines: readonly string[]): void {
+    if (lines.length === 0) return
+    const entry = this.buffer(sessionId)
+    for (const line of lines) entry.pending.push(line)
   }
 
   /** Flush whatever is left even though the step threshold was not reached. */

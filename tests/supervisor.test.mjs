@@ -219,6 +219,18 @@ function harness(options) {
 
 const stepEnd = (turn, step) => ({ type: 'step/end', seq: step, data: { turn, step } })
 
+test('transcript notes request-side images the event feed never carries', () => {
+  // Measured on the live stream: session/event user messages contain only text
+  // parts — GUI-attached images travel in the model request alone. The
+  // `agent/request` capture reports them through noteLines so the reviewer
+  // learns the turn had a screenshot instead of reading it as silence.
+  const { t, deltas } = harness({ stepsBetweenReviews: 1 })
+  t.noteLines(sid, ['[image: screenshot.png]'])
+  t.handleEvent(sid, stepEnd(1, 1))
+  assert.equal(deltas.length, 1)
+  assert.match(deltas[0][1].markdown, /\[image: screenshot\.png\]/, 'the note reaches the delta')
+})
+
 test('transcript reviews every N steps and renders roles', () => {
   const { t, deltas, steps } = harness({ stepsBetweenReviews: 2 })
   t.handleEvent(sid, {
@@ -387,6 +399,27 @@ test('reviewer parses a bare JSON frame and emits the note', async () => {
   const text = llm.calls[0].messages[0].content[0].text
   assert.ok(text.startsWith(SUPERVISOR_SYSTEM_PROMPT), 'the contract precedes the transcript')
   assert.match(text, /add --force/, 'the transcript follows it')
+})
+
+test('reviewer sends captured images with the review and drains them once', async () => {
+  // The session/event feed carries no image blocks, so the host hands request
+  // side images over through getImages; the review call must actually look at
+  // them, and must not re-send them on the next review.
+  const queue = [{ mediaType: 'image/png', data: 'aGVsbG8=' }]
+  const llm = fakeLlm([[JSON.stringify({ note: 'Nothing to add' })], [JSON.stringify({ note: 'Nothing to add' })]])
+  const { r } = reviewer(llm, { getImages: () => queue.splice(0, queue.length) })
+  r.enqueue(delta('a'))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  r.enqueue(delta('b'))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(llm.calls.length, 2)
+  assert.equal(llm.calls[0].messages[0].content.length, 2, 'text + image')
+  assert.deepEqual(
+    { type: llm.calls[0].messages[0].content[1].type, mediaType: llm.calls[0].messages[0].content[1].mediaType },
+    { type: 'image', mediaType: 'image/png' },
+  )
+  assert.match(llm.calls[0].messages[0].content[0].text, /附 1 张用户截图/)
+  assert.equal(llm.calls[1].messages[0].content.length, 1, 'drained: the second review is text-only')
 })
 
 test('reviewer tolerates prose and fences around the frame', async () => {

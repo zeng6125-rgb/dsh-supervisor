@@ -33,7 +33,7 @@ import { SessionTranscript } from './transcript.js'
 
 export { Config }
 export const name = SUPERVISOR_PLUGIN_ID
-export const inject = ['agents', 'llm', 'webServer', 'tools', 'configEditor']
+export const inject = ['agents', 'llm', 'webServer', 'tools', 'configEditor', 'attachments']
 
 const API = '/dsh-supervisor/api'
 
@@ -191,6 +191,12 @@ export function apply(ctx0: Context, config?: unknown): void {
   const reviewers = new Map<string, Reviewer>()
   /** provider/model actually in use per session, captured from `agent/request`. */
   const routes = new Map<string, ReviewerRoute>()
+  /** Image notes already folded into the transcript, per session (one request
+   *  per step repeats the whole history, so notes must be de-duplicated). */
+  const imageNotes = new Map<string, Set<string>>()
+  /** Bytes of request-side images, drained by the reviewer per call (the
+   *  reviewer looks at what the user actually attached, then they clear). */
+  const pendingImages = new Map<string, Array<{ mediaType: string; data: string }>>()
 
   // jev as a cheap detection gate: one typed call per delta, and only a flagged
   // delta pays for the LLM review. Public contract only — the registered tool,
@@ -246,6 +252,15 @@ export function apply(ctx0: Context, config?: unknown): void {
         cfg.reviewProvider && cfg.reviewModel
           ? { provider: cfg.reviewProvider, model: cfg.reviewModel }
           : undefined,
+      // Drained per call: each review looks at the images captured since the
+      // previous one, then they clear (a re-request replays the whole history
+      // and would otherwise re-send the same screenshot every step).
+      getImages: () => {
+        const queue = pendingImages.get(sessionId)
+        if (!queue || queue.length === 0) return []
+        const drained = queue.splice(0, queue.length)
+        return drained.slice(0, 4) // cap: a review with a wall of images is noise
+      },
       onFallback: (route) => {
         state.setSession(sessionId, { fallback: route })
         log.warn('reviewer switched to the fallback route', { sessionId, ...route })
@@ -314,6 +329,8 @@ export function apply(ctx0: Context, config?: unknown): void {
     reviewers.get(sessionId)?.dispose()
     reviewers.delete(sessionId)
     routes.delete(sessionId)
+    imageNotes.delete(sessionId)
+    pendingImages.delete(sessionId)
     delivery.unregisterAgent(sessionId)
     state.dropSession(sessionId)
   }
@@ -431,6 +448,52 @@ export function apply(ctx0: Context, config?: unknown): void {
             // keeps parseFailsByRoute attributed to the reviewing model.
             const pinned = cfg.reviewProvider && cfg.reviewModel
             state.setSession(sessionId, { route: pinned ? { provider: cfg.reviewProvider, model: cfg.reviewModel } : route })
+          }
+        }
+        // GUI-attached images never enter the session/event feed (measured on
+        // the live stream), so the reviewer would read a screenshot-bearing
+        // turn as the user saying nothing. Scan the request's user turns for
+        // image parts: note them into the transcript delta AND keep the bytes
+        // so the review call can actually look at them.
+        if (sessionId && Array.isArray(callConfig?.messages)) {
+          const notes: string[] = []
+          const attachments = (ctx0 as HostContext)?.attachments
+          for (const message of callConfig.messages) {
+            if (message?.role !== 'user' || !Array.isArray(message?.content)) continue
+            for (const part of message.content) {
+              if (part?.type === 'image') {
+                const label = part.name || part.mediaType || 'screenshot'
+                notes.push(`[image: ${label}]`)
+                // Wire form carries base64 inline; admitted form carries a
+                // durable ref whose bytes need one service call.
+                if (typeof part.data === 'string' && part.data) {
+                  pendingImages.get(sessionId)?.push({ mediaType: part.mediaType || 'image/png', data: part.data })
+                } else if (part.attachment && attachments?.readImage) {
+                  void attachments
+                    .readImage(part.attachment)
+                    .then((stored: any) => {
+                      if (stored?.data) {
+                        pendingImages.get(sessionId)?.push({
+                          mediaType: part.mediaType || 'image/png',
+                          data: Buffer.from(stored.data).toString('base64'),
+                        })
+                      }
+                    })
+                    .catch(() => { /* a missing image must not fail the capture */ })
+                }
+              } else if (part?.type === 'file') {
+                notes.push(`[file: ${part.attachment?.name || 'attachment'}]`)
+              }
+            }
+          }
+          if (notes.length > 0) {
+            // One request per turn step repeats the whole history: only note
+            // images the reviewer has not already been told about.
+            const seen = imageNotes.get(sessionId) ?? new Set<string>()
+            const fresh = notes.filter((n) => !seen.has(n))
+            for (const n of fresh) seen.add(n)
+            imageNotes.set(sessionId, seen)
+            if (fresh.length > 0) transcript.noteLines(sessionId, fresh)
           }
         }
       } catch (error) {

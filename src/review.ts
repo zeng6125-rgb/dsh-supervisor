@@ -83,6 +83,13 @@ export interface ReviewerOptions {
    * own route. Live-read so the settings page can pin or unpin mid-session.
    */
   readonly getReviewRoute?: () => { readonly provider: string; readonly model: string } | undefined
+  /**
+   * Images attached to the session since this reviewer last looked, drained on
+   * read. The session/event feed carries no image blocks, so the host captures
+   * them from `agent/request` and hands them over here — without this the
+   * reviewer reads a screenshot-bearing turn as the user saying nothing.
+   */
+  readonly getImages?: () => readonly { readonly mediaType: string; readonly data: string }[]
   /** Fired once per switch to the fallback route, for the ledger and the panel. */
   readonly onFallback?: (route: ReviewerRoute) => void
   /** Fired once per blind episode: the review route failed `afterErrors` times
@@ -441,10 +448,21 @@ export class Reviewer {
       // The contract again at the very end: weak models forget the copy that
       // sits ahead of a 60-message delta (no_frame was 44/44 of parse fails).
       promptText += `\n\n${CONTRACT_REMINDER}`
+      // Request-side images (user screenshots), drained so each review looks at
+      // them once. Placed after the text: the same order the main agent reads.
+      const images = this.options.getImages?.() ?? []
+      const content: unknown[] = [{ type: 'text', text: promptText }]
+      for (const image of images) {
+        content.push({ type: 'image', mediaType: image.mediaType, data: image.data })
+      }
+      if (images.length > 0) {
+        promptText += `\n\n（附 ${images.length} 张用户截图，见消息末尾的 image 块）`
+        ;(content[0] as { text: string }).text = promptText
+      }
       const options: Record<string, unknown> = {
         provider: route.provider,
         model: route.model,
-        messages: [{ role: 'user', content: [{ type: 'text', text: promptText }] }],
+        messages: [{ role: 'user', content }],
         maxTokens: this.maxTokens,
         signal: timeout.signal,
       }
