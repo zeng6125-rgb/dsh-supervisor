@@ -45,7 +45,7 @@ interface Snapshot {
   enabled?: boolean
   intercept?: boolean
   stepsBetweenReviews?: number
-  totals?: { sessions: number; steps: number; reviews: number; notes: number; unhealthy: number; outcomes: Record<string, number>; gate?: { cleared: number; falseClears: number; flagged: number; confirmed: number } }
+  totals?: { sessions: number; steps: number; reviews: number; notes: number; unhealthy: number; outcomes: Record<string, number>; parseFails?: Record<string, number>; parseFailsByRoute?: Record<string, Record<string, number>>; errorKinds?: Record<string, number>; gateByRoute?: Record<string, { cleared: number; falseClears: number; flagged: number; confirmed: number; reviews: number }>; gate?: { cleared: number; falseClears: number; flagged: number; confirmed: number } }
   alerts?: Alert[]
   sessions?: SessionState[]
   error?: string
@@ -393,6 +393,20 @@ var OUTCOME_ZH: Record<string, string> = {
   error: '调用失败',
   quota: '额度耗尽',
   halted: '永久失败',
+}
+
+/** Failure fingerprints (server-side `fingerprintFailure`), for the footer line. */
+var KIND_ZH: Record<string, string> = {
+  timeout: '超时',
+  network: '网络',
+  'rate-limit': '限流',
+  auth: '鉴权',
+  'invalid-request': '无效请求',
+  'model-not-found': '模型不存在',
+  'max-tokens': '长度超限',
+  aborted: '中断',
+  'server-5xx': '服务端 5xx',
+  other: '其他',
 }
 
 function relative(at: number, now: number): string {
@@ -1069,6 +1083,17 @@ function Status(props: { live: Snapshot; titleOf?: (sessionId: string) => string
       if (gate.cleared > 0) parts.push('门 clear ' + gate.cleared + (gate.falseClears ? ' · 误放 ' + gate.falseClears : ''))
       if (gate.flagged > 0) parts.push('命中 ' + gate.flagged + (gate.confirmed ? ' · 证实 ' + gate.confirmed : ''))
       outcomes.push(parts.join(' · '))
+    }
+    // Failure fingerprints, so a throttled route reads differently from a
+    // dead one: `error` alone never said which fix was needed.
+    var kinds = totals.errorKinds
+    if (kinds) {
+      var kindParts: string[] = []
+      for (var kind of Object.keys(kinds)) {
+        var n = kinds[kind]
+        if (n) kindParts.push(KIND_ZH[kind] || kind + ' ' + n)
+      }
+      if (kindParts.length) outcomes.push('失败 ' + kindParts.join(' · '))
     }
   }
 

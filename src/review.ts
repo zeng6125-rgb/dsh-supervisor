@@ -101,8 +101,9 @@ export interface ReviewerOptions {
   readonly onNote: (note: SupervisorNote) => void
   readonly onStateChange?: (state: ReviewerState) => void
   /** `reply` is set for `unparseable` so callers can surface what came back;
-   *  `reason` says which parse exit produced it. */
-  readonly onOutcome?: (outcome: ReviewOutcome, reply?: string, reason?: ParseFailReason) => void
+   *  `reason` says which parse exit produced it; `failure` (for error-family
+   *  outcomes) carries the kind + fingerprint the ledger groups by. */
+  readonly onOutcome?: (outcome: ReviewOutcome, reply?: string, reason?: ParseFailReason, failure?: FailureInfo) => void
   readonly logger?: { debug: (...args: unknown[]) => void; warn: (...args: unknown[]) => void }
 }
 
@@ -161,11 +162,36 @@ function extractJsonFrame(text: string): string | undefined {
 /** Consecutive failed reviews before a fallback-less session is called blind. */
 const BLIND_AFTER_ERRORS = 3
 
+/** Failure kind plus a coarse fingerprint of *what* failed, for the ledger:
+ *  `error` alone told us 523 reviews died but not of what. */
+export interface FailureInfo {
+  readonly kind: 'transient' | 'quota' | 'permanent'
+  /** Stable bucket: `timeout`, `http-429`, `invalid-request`, `network`, … */
+  readonly fingerprint: string
+}
+
 function classifyFailure(error: unknown): 'transient' | 'quota' | 'permanent' {
   const text = `${(error as { message?: string })?.message ?? ''} ${(error as { code?: string })?.code ?? ''}`.toLowerCase()
   if (/quota|rate.?limit|429|insufficient/.test(text)) return 'quota'
   if (/invalid_request|model.?not.?found|unsupported|400|404|does not exist/.test(text)) return 'permanent'
   return 'transient'
+}
+
+/** Coarse, stable fingerprint of a failure, so the ledger can group them. */
+function fingerprintFailure(error: unknown): string {
+  const message = String((error as { message?: string })?.message ?? error ?? '')
+  const text = message.toLowerCase()
+  const code = String((error as { code?: string })?.code ?? '').toLowerCase()
+  if (/timeout|etimedout|timed out/.test(text)) return 'timeout'
+  if (/econnrefused|econnreset|enotfound|network|socket hang up|fetch failed/.test(text)) return 'network'
+  if (/429|rate.?limit|quota|insufficient/.test(text) || /429/.test(code)) return 'rate-limit'
+  if (/401|403|unauthor|forbidden/.test(text)) return 'auth'
+  if (/invalid_request|bad request/.test(text) || /400/.test(code)) return 'invalid-request'
+  if (/model.?not.?found|does not exist|404/.test(text) || /404/.test(code)) return 'model-not-found'
+  if (/max.?tokens|length/.test(text)) return 'max-tokens'
+  if (/abort/.test(text)) return 'aborted'
+  if (/5\d\d|internal server|bad gateway|unavailable/.test(text)) return 'server-5xx'
+  return 'other'
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -341,17 +367,26 @@ export class Reviewer {
           return
         } catch (error) {
           const kind = classifyFailure(error)
+          const failure: FailureInfo = { kind, fingerprint: fingerprintFailure(error) }
           if (kind === 'quota') {
             this.options.logger?.warn?.('reviewer paused: quota exhausted', { error: String(error) })
             this.setState('quota_exhausted')
-            this.report('quota')
+            this.report('quota', undefined, undefined, failure)
             return
           }
           if (kind === 'permanent') {
             this.options.logger?.warn?.('reviewer halted: permanent model failure', { error: String(error) })
             this.setState('halted')
-            this.report('halted')
+            this.report('halted', undefined, undefined, failure)
             return
+          }
+          // A throttled or slow route needs more than 500ms: back off before
+          // the single retry so the window can recover. Measured: the error
+          // ledger's largest bucket is the rate-limit family, and 500ms is
+          // far below any real window.
+          if (attempt === 0 && (failure.fingerprint === 'rate-limit' || failure.fingerprint === 'timeout')) {
+            this.options.logger?.warn?.('review attempt throttled; backing off before the retry', { fingerprint: failure.fingerprint })
+            await sleep(4000, this.controller.signal)
           }
           if (attempt === 1) {
             this.consecutiveErrors++
@@ -371,7 +406,7 @@ export class Reviewer {
               this.options.onBlind?.({ errors: this.consecutiveErrors, route: this.route })
             }
             this.options.logger?.warn?.('review dropped after retry', { error: String(error) })
-            this.report('error')
+            this.report('error', undefined, undefined, failure)
           }
         }
       }
@@ -380,8 +415,8 @@ export class Reviewer {
     }
   }
 
-  private report(outcome: ReviewOutcome, reply?: string, reason?: ParseFailReason): void {
-    this.options.onOutcome?.(outcome, reply, reason)
+  private report(outcome: ReviewOutcome, reply?: string, reason?: ParseFailReason, failure?: FailureInfo): void {
+    this.options.onOutcome?.(outcome, reply, reason, failure)
   }
 
   /**

@@ -581,6 +581,23 @@ test('outcomes: state.recordReview keeps reviews and outcomes in agreement', asy
   )
 })
 
+test('outcomes: failures are ledgered by fingerprint, and gate agreement by route', async () => {
+  // `error` alone could not tell a throttled route from a dead one; the
+  // fingerprint splits them, and gateByRoute answers whether a rising miss
+  // rate belongs to one route (prompt problem) or all of them (threshold).
+  const state = new SupervisorState()
+  state.setSession('s1', { route: { provider: 'qwen', model: 'qwen3-max' } })
+  state.recordReview('s1', 'error', undefined, undefined, { fingerprint: 'rate-limit' })
+  state.recordReview('s1', 'error', undefined, undefined, { fingerprint: 'rate-limit' })
+  state.recordReview('s1', 'error', undefined, undefined, { fingerprint: 'timeout' })
+  state.recordGate('s1', 'cleared')
+  state.recordGate('s1', 'false_clear')
+  const totals = state.totals()
+  assert.deepEqual(totals.errorKinds, { 'rate-limit': 2, timeout: 1 })
+  // The bucket carries its reviews denominator, so 1/1 never reads as 100%.
+  assert.deepEqual(totals.gateByRoute['qwen/qwen3-max'], { cleared: 1, falseClears: 1, flagged: 0, confirmed: 0, reviews: 3 })
+})
+
 test('outcomes: an unhealthy reviewer is visible in totals', async () => {
   const state = new SupervisorState()
   const llm = fakeLlm([['I think this is fine'], ['still prose'], ['prose again'], ['prose forever']])

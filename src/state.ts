@@ -41,6 +41,9 @@ export interface SupervisorSessionState {
    *  counts twice). Tells `no_frame` (model never emitted JSON) apart from
    *  `empty_note` (frame fine, nothing inside) — different fixes. */
   readonly parseFails?: Readonly<Record<string, number>>
+  /** How each failed review died, by fingerprint (`timeout`, `rate-limit`, …).
+   *  `error` alone could not tell a dead route from a throttled one. */
+  readonly errorKinds?: Readonly<Record<string, number>>
   /** Gate-vs-LLM agreement: how often jev screened clear, and how often the
    *  LLM then disagreed with a note (a measured gate miss). `flagged` counts
    *  deltas the gate hit on, `confirmed` the subset where the review then
@@ -62,6 +65,7 @@ interface PersistedSession {
   outcomes: Record<string, number>
   route?: { provider: string; model: string }
   parseFails?: Record<string, number>
+  errorKinds?: Record<string, number>
   gate?: { cleared: number; falseClears: number; flagged?: number; confirmed?: number }
 }
 
@@ -95,6 +99,7 @@ export class SupervisorState {
           outcomes: saved.outcomes ?? {},
           ...(saved.route ? { route: { ...saved.route } } : {}),
           ...(saved.parseFails ? { parseFails: { ...saved.parseFails } } : {}),
+          ...(saved.errorKinds ? { errorKinds: { ...saved.errorKinds } } : {}),
           ...(saved.gate
             ? {
                 gate: {
@@ -157,7 +162,13 @@ export class SupervisorState {
    * "the reviewer ran five times and understood nothing", which `reviews: 5`
    * alone could never express.
    */
-  recordReview(sessionId: string, outcome: ReviewOutcome, reply?: string, reason?: ParseFailReason): void {
+  recordReview(
+    sessionId: string,
+    outcome: ReviewOutcome,
+    reply?: string,
+    reason?: ParseFailReason,
+    failure?: { readonly fingerprint: string },
+  ): void {
     const current = this.base(sessionId)
     this.sessions.set(sessionId, {
       ...current,
@@ -166,6 +177,11 @@ export class SupervisorState {
       ...(outcome === 'unparseable' && reply ? { badReply: reply.slice(0, MAX_BAD_REPLY) } : {}),
       ...(outcome === 'unparseable' && reason
         ? { parseFails: { ...current.parseFails, [reason]: (current.parseFails?.[reason] ?? 0) + 1 } }
+        : {}),
+      // Error-family outcomes carry a fingerprint (`timeout`, `rate-limit`, …):
+      // `error` alone could not tell a dead route from a throttled one.
+      ...(failure?.fingerprint
+        ? { errorKinds: { ...current.errorKinds, [failure.fingerprint]: (current.errorKinds?.[failure.fingerprint] ?? 0) + 1 } }
         : {}),
     })
     this.scheduleFlush()
@@ -239,29 +255,47 @@ export class SupervisorState {
      *  visible instead of hiding inside the global average. Sessions restored
      *  from before route persistence land under `unknown`. */
     parseFailsByRoute: Record<string, Record<string, number>>
+    /** Failed reviews by fingerprint (`timeout`, `rate-limit`, …). */
+    errorKinds: Record<string, number>
+    /** Gate agreement keyed by route, each bucket carrying its `reviews`
+     *  denominator: a 1/1 miss is not a 100% miss rate. A rising miss rate
+     *  concentrated on one route is a prompt problem; spread evenly it is a
+     *  threshold problem. */
+    gateByRoute: Record<string, { cleared: number; falseClears: number; flagged: number; confirmed: number; reviews: number }>
     gate: { cleared: number; falseClears: number; flagged: number; confirmed: number }
   } {
     const outcomes: Record<string, number> = {}
     const parseFails: Record<string, number> = {}
     const parseFailsByRoute: Record<string, Record<string, number>> = {}
+    const errorKinds: Record<string, number> = {}
+    const gateByRoute: Record<string, { cleared: number; falseClears: number; flagged: number; confirmed: number; reviews: number }> = {}
     const gate = { cleared: 0, falseClears: 0, flagged: 0, confirmed: 0 }
     let steps = 0
     let reviews = 0
     for (const session of this.all()) {
       steps += session.steps
       reviews += session.reviews
+      const route = session.route ? `${session.route.provider}/${session.route.model}` : 'unknown'
+      const routeGate = (gateByRoute[route] ??= { cleared: 0, falseClears: 0, flagged: 0, confirmed: 0, reviews: 0 })
       gate.cleared += session.gate?.cleared ?? 0
       gate.falseClears += session.gate?.falseClears ?? 0
       gate.flagged += session.gate?.flagged ?? 0
       gate.confirmed += session.gate?.confirmed ?? 0
+      routeGate.cleared += session.gate?.cleared ?? 0
+      routeGate.falseClears += session.gate?.falseClears ?? 0
+      routeGate.flagged += session.gate?.flagged ?? 0
+      routeGate.confirmed += session.gate?.confirmed ?? 0
+      routeGate.reviews += session.reviews
       for (const [outcome, count] of Object.entries(session.outcomes)) {
         outcomes[outcome] = (outcomes[outcome] ?? 0) + count
       }
       for (const [reason, count] of Object.entries(session.parseFails ?? {})) {
         parseFails[reason] = (parseFails[reason] ?? 0) + count
-        const route = session.route ? `${session.route.provider}/${session.route.model}` : 'unknown'
         const bucket = (parseFailsByRoute[route] ??= {})
         bucket[reason] = (bucket[reason] ?? 0) + count
+      }
+      for (const [kind, count] of Object.entries(session.errorKinds ?? {})) {
+        errorKinds[kind] = (errorKinds[kind] ?? 0) + count
       }
     }
     const unhealthy = UNHEALTHY_OUTCOMES.reduce((sum, outcome) => sum + (outcomes[outcome] ?? 0), 0)
@@ -274,6 +308,8 @@ export class SupervisorState {
       outcomes,
       parseFails,
       parseFailsByRoute,
+      errorKinds,
+      gateByRoute,
       gate,
     }
   }
@@ -304,6 +340,7 @@ export class SupervisorState {
         outcomes: { ...session.outcomes },
         ...(session.route ? { route: { ...session.route } } : {}),
         ...(session.parseFails ? { parseFails: { ...session.parseFails } } : {}),
+        ...(session.errorKinds ? { errorKinds: { ...session.errorKinds } } : {}),
         ...(session.gate ? { gate: { ...session.gate } } : {}),
       }
     }

@@ -291,10 +291,10 @@ export function apply(ctx0: Context, config?: unknown): void {
       },
       // Count finished reviews, not initiations, and record *how* each ended —
       // otherwise `reviews: 5` cannot be told apart from five silent failures.
-      onOutcome: (outcome, reply, reason) => {
-        state.recordReview(sessionId, outcome, reply, reason)
+      onOutcome: (outcome, reply, reason, failure) => {
+        state.recordReview(sessionId, outcome, reply, reason, failure)
         if (outcome !== 'silent' && outcome !== 'note' && outcome !== 'suppressed') {
-          log.warn('review ended unhealthy', { sessionId, outcome })
+          log.warn('review ended unhealthy', { sessionId, outcome, fingerprint: failure?.fingerprint })
         }
       },
       logger: log,
