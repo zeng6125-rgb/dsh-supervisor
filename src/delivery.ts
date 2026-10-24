@@ -66,6 +66,22 @@ export class SupervisorDelivery {
     this.gates.delete(sessionId)
   }
 
+  /**
+   * The turn completed: a held gate must not fold the final output into an
+   * extra turn. Instead of dropping the note (silent loss) or holding the
+   * step (the fold the user reported), hand it to the running work as a
+   * silent inject — the summary stays whole and the advice still lands.
+   * Returns the released note and the channel it rode, or undefined when
+   * nothing was armed (the caller records the alert under the real channel).
+   */
+  releaseAtTurnEnd(sessionId: string): { note: SupervisorNote; channel: 'delivered' | 'dropped' } | undefined {
+    const note = this.gates.get(sessionId)
+    if (!note) return undefined
+    this.gates.delete(sessionId)
+    this.options.logger?.debug?.('gate released at turn end', { sessionId, severity: note.severity })
+    return { note, channel: this.deliver(sessionId, note) ? 'delivered' : 'dropped' }
+  }
+
   isArmed(sessionId: string): boolean {
     return this.gates.has(sessionId)
   }

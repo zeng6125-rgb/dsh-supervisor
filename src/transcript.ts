@@ -20,6 +20,13 @@ export interface TranscriptObserverOptions {
   onStepEnd: (sessionId: string, turn: number, step: number) => void
   /** The surface was rewritten (compaction): everything buffered is stale. */
   onRewrite: (sessionId: string) => void
+  /**
+   * A turn ended. `reason` is the host's TurnEndReason kind (`completed`,
+   * `aborted`, `error`, …). The host uses `completed` to drop a pending
+   * intercept: holding a step after the final output would fold the summary
+   * the user just read into an extra turn.
+   */
+  onTurnEnd?: (sessionId: string, turn: number, reason: string) => void
   logger?: { debug: (...args: unknown[]) => void; warn: (...args: unknown[]) => void }
 }
 
@@ -133,6 +140,12 @@ export class SessionTranscript {
         entry.steps += 1
         this.options.onStepEnd(sessionId, turn, step)
         if (entry.steps >= this.stepsBetweenReviews) this.flush(sessionId)
+        return
+      }
+      case 'turn/end': {
+        const turn = Number(event.data?.turn ?? 0)
+        const reason = String(event.data?.reason?.kind ?? 'unknown')
+        this.options.onTurnEnd?.(sessionId, turn, reason)
         return
       }
       default:

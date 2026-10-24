@@ -219,6 +219,19 @@ function harness(options) {
 
 const stepEnd = (turn, step) => ({ type: 'step/end', seq: step, data: { turn, step } })
 
+test('transcript reports turn ends with the host reason kind', () => {
+  const turns = []
+  const { t } = harness({
+    stepsBetweenReviews: 1,
+    onTurnEnd: (sessionId, turn, reason) => turns.push([sessionId, turn, reason]),
+  })
+  t.handleEvent(sid, stepEnd(1, 1))
+  t.handleEvent(sid, { type: 'turn/end', seq: 3, data: { turn: 1, reason: { kind: 'completed' } } })
+  t.handleEvent(sid, stepEnd(2, 1))
+  t.handleEvent(sid, { type: 'turn/end', seq: 5, data: { turn: 2, reason: { kind: 'aborted', reason: { kind: 'legacy' } } } })
+  assert.deepEqual(turns, [[sid, 1, 'completed'], [sid, 2, 'aborted']])
+})
+
 test('transcript notes request-side images the event feed never carries', () => {
   // Measured on the live stream: session/event user messages contain only text
   // parts — GUI-attached images travel in the model request alone. The
@@ -940,6 +953,30 @@ test('a second note while armed delivers instead of double-arming', () => {
   assert.equal(d.raise(sid, note('problem A')), 'armed')
   assert.equal(d.raise(sid, note('problem B')), 'delivered')
   assert.equal(agent.injected.length, 1)
+})
+
+test('a gate released at turn end is injected, not held and not lost', () => {
+  // The reported failure mode: the final summary was folded into an extra
+  // turn because intercept held a step after the turn had already completed.
+  // A completed turn must release the note as a silent inject instead.
+  const agent = fakeAgent()
+  const { d } = delivery(true, agent)
+  d.raise(sid, note('problem A'))
+  assert.equal(d.isArmed(sid), true)
+  const released = d.releaseAtTurnEnd(sid)
+  assert.ok(released, 'the armed gate is released')
+  assert.equal(released.channel, 'delivered')
+  assert.equal(agent.injected.length, 1, 'the note rides the running work')
+  assert.equal(d.isArmed(sid), false, 'nothing is left to hold a step')
+  // A later step passes normally: no reject, no extra turn.
+  assert.equal(d.interceptStep(sid, deliveryAgent(agent), [{ id: 'u1' }]), false)
+})
+
+test('releaseAtTurnEnd is a no-op when nothing is armed', () => {
+  const agent = fakeAgent()
+  const { d } = delivery(true, agent)
+  assert.equal(d.releaseAtTurnEnd(sid), undefined)
+  assert.equal(agent.injected.length, 0)
 })
 
 test('interceptStep is a no-op when nothing is armed', () => {

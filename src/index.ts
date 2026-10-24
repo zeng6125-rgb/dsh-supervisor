@@ -318,6 +318,22 @@ export function apply(ctx0: Context, config?: unknown): void {
       syncArmed(sessionId)
       reviewers.get(sessionId)?.resetGuard()
     },
+    // A completed turn is the conversation's own ending: holding the next step
+    // would fold the final output the user just read into an extra turn that
+    // only exists to carry our note. Release the gate as a silent inject
+    // instead — the summary stays whole and the advice still lands. Any later
+    // step re-arms naturally through the normal delivery path.
+    onTurnEnd: (sessionId, turn, reason) => {
+      if (reason !== 'completed') return
+      const released = delivery.releaseAtTurnEnd(sessionId)
+      if (released) {
+        // The alert was recorded as `armed` when raised; re-channel it to what
+        // it actually rode instead of appending a second copy.
+        state.updateAlertChannel(sessionId, released.note, released.channel)
+        syncArmed(sessionId)
+        log.debug('gate released at turn end', { sessionId, turn, channel: released.channel })
+      }
+    },
     onDelta: (sessionId, delta) => {
       ensureReviewer(sessionId)?.enqueue(delta)
     },

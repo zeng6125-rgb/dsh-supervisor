@@ -145,6 +145,21 @@ export class SupervisorState {
     return count
   }
 
+  /**
+   * Re-channel the most recent matching `armed` alert instead of appending a
+   * second one: a note raised during intercept and released at turn end is
+   * one piece of advice, and the ledger must not bill it twice.
+   */
+  updateAlertChannel(sessionId: string, note: SupervisorNote, channel: DeliveryChannel): void {
+    for (const alert of this.alerts) {
+      if (alert.sessionId === sessionId && alert.channel === 'armed' && alert.note === note.note) {
+        ;(alert as { channel: DeliveryChannel }).channel = channel
+        ;(alert as { intercepted: boolean }).intercepted = channel === 'armed'
+        return
+      }
+    }
+  }
+
   setSession(sessionId: string, patch: Partial<Omit<SupervisorSessionState, 'sessionId'>>): void {
     this.sessions.set(sessionId, { ...this.base(sessionId), ...patch })
   }
