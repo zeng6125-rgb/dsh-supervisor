@@ -995,18 +995,19 @@ test('a second note while armed delivers instead of double-arming', () => {
   assert.equal(agent.injected.length, 1)
 })
 
-test('a gate released at turn end is injected, not held and not lost', () => {
-  // The reported failure mode: the final summary was folded into an extra
-  // turn because intercept held a step after the turn had already completed.
-  // A completed turn must release the note as a silent inject instead.
+test('a gate released at turn end is parked, not held and not injected', () => {
+  // The reported failure mode: the final summary was followed by an extra
+  // agent turn whose only content was our advice (an inject wakes the agent).
+  // A completed turn must park the note on the panel: visible, not injected,
+  // and nothing left to hold a step.
   const agent = fakeAgent()
   const { d } = delivery(true, agent)
   d.raise(sid, note('problem A'))
   assert.equal(d.isArmed(sid), true)
   const released = d.releaseAtTurnEnd(sid)
   assert.ok(released, 'the armed gate is released')
-  assert.equal(released.channel, 'delivered')
-  assert.equal(agent.injected.length, 1, 'the note rides the running work')
+  assert.equal(released.channel, 'panel')
+  assert.equal(agent.injected.length, 0, 'no inject: the conversation stays ended')
   assert.equal(d.isArmed(sid), false, 'nothing is left to hold a step')
   // A later step passes normally: no reject, no extra turn.
   assert.equal(d.interceptStep(sid, deliveryAgent(agent), [{ id: 'u1' }]), false)
@@ -1040,17 +1041,33 @@ test('re-queue failure does not lose the note', async () => {
   assert.equal(agent.steered.length, 1, 'the note still reaches the agent')
 })
 
-test('a note for a closed turn is injected, never armed (no extra output)', () => {
-  // Reported symptom: after the final summary, the reviewer still produced one
-  // more turn of output. Root cause: the review ran after turn/end, armed, and
-  // held the next turn's first step. A closed-turn note must only inject.
+test('a note for a closed turn parks on the panel — no inject, no extra turn', () => {
+  // Reported symptom (with intercept OFF): after the final summary the agent
+  // still produced one more turn replying to the supervisor's note. Measured
+  // cause: an inject wakes the agent into exactly that turn. So a closed-turn
+  // note parks on the panel only: visible, ackable, conversation stays ended.
   const agent = fakeAgent()
   const { d } = delivery(true, agent)
   const channel = d.deliverClosedTurn(sid, note('late note'))
-  assert.equal(channel, 'delivered')
-  assert.equal(agent.injected.length, 1)
-  assert.equal(d.isArmed(sid), false, 'nothing is armed, so no step can be held')
+  assert.equal(channel, 'panel')
+  assert.equal(agent.injected.length, 0, 'nothing is injected, so no turn is opened')
+  assert.equal(agent.steered.length, 0, 'and the driver is never woken')
+  assert.equal(d.isArmed(sid), false)
   assert.equal(d.interceptStep(sid, deliveryAgent(agent), [{ id: 'u1' }]), false)
+})
+
+test('a gate armed when the turn completes parks instead of injecting', () => {
+  // Same rule for the intercept path: the note survives (panel + alert), the
+  // conversation does not gain a turn whose only content is our advice.
+  const agent = fakeAgent()
+  const { d } = delivery(true, agent)
+  d.raise(sid, note('problem A'))
+  const released = d.releaseAtTurnEnd(sid)
+  assert.ok(released)
+  assert.equal(released.channel, 'panel')
+  assert.equal(agent.injected.length, 0)
+  assert.equal(agent.steered.length, 0)
+  assert.equal(d.isArmed(sid), false)
 })
 
 test('unregister clears the armed gate', () => {

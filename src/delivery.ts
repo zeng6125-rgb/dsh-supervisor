@@ -67,19 +67,18 @@ export class SupervisorDelivery {
   }
 
   /**
-   * The turn completed: a held gate must not fold the final output into an
-   * extra turn. Instead of dropping the note (silent loss) or holding the
-   * step (the fold the user reported), hand it to the running work as a
-   * silent inject — the summary stays whole and the advice still lands.
-   * Returns the released note and the channel it rode, or undefined when
-   * nothing was armed (the caller records the alert under the real channel).
+   * The turn completed while a gate was armed: the note must not fold the
+   * final output into an extra turn, and (measured) an inject would wake the
+   * agent into exactly such a turn. Park it on the panel instead — visible,
+   * ackable, gone from the conversation. Returns the note and its channel, or
+   * undefined when nothing was armed (the caller re-channels the alert).
    */
-  releaseAtTurnEnd(sessionId: string): { note: SupervisorNote; channel: 'delivered' | 'dropped' } | undefined {
+  releaseAtTurnEnd(sessionId: string): { note: SupervisorNote; channel: 'panel' } | undefined {
     const note = this.gates.get(sessionId)
     if (!note) return undefined
     this.gates.delete(sessionId)
-    this.options.logger?.debug?.('gate released at turn end', { sessionId, severity: note.severity })
-    return { note, channel: this.deliver(sessionId, note) ? 'delivered' : 'dropped' }
+    this.options.logger?.debug?.('gate parked at turn end', { sessionId, severity: note.severity })
+    return { note, channel: 'panel' }
   }
 
   isArmed(sessionId: string): boolean {
@@ -103,14 +102,16 @@ export class SupervisorDelivery {
   }
 
   /**
-   * The turn this note reviews has already completed: inject it as a silent
-   * notice regardless of the intercept setting. Arming would hold a step of
-   * the *next* turn — an extra output the user never asked for. Returns the
-   * channel it rode (`dropped` when no agent is reachable).
+   * The turn this note reviews has already completed. Measured on the live
+   * session: an inject here wakes the agent into a brand-new turn whose only
+   * content is "here is advice about the turn you just finished" — the user
+   * reported exactly that extra message. So the note goes to the panel only
+   * (still visible, still acked) and the conversation ends where it ended.
+   * Returns `panel` as the channel; nothing is injected or armed.
    */
-  deliverClosedTurn(sessionId: string, note: SupervisorNote): 'delivered' | 'dropped' {
-    this.options.logger?.debug?.('note delivered for a closed turn', { sessionId, severity: note.severity })
-    return this.deliver(sessionId, note) ? 'delivered' : 'dropped'
+  deliverClosedTurn(sessionId: string, note: SupervisorNote): 'panel' {
+    this.options.logger?.debug?.('note parked for a closed turn', { sessionId, severity: note.severity })
+    return 'panel'
   }
 
   /**
