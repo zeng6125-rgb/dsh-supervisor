@@ -238,7 +238,7 @@ export function apply(ctx0: Context, config?: unknown): void {
       get gateSkipClear() {
         return cfg.gateSkipClear
       },
-      onGateStat: (stat) => state.recordGate(sessionId, stat),
+      onGateStat: (stat, categories) => state.recordGate(sessionId, stat, categories),
       // Blind-spot fix: a dead review route no longer silences the session —
       // after enough consecutive failures the reviewer rides this route.
       getFallback: () =>
@@ -280,11 +280,11 @@ export function apply(ctx0: Context, config?: unknown): void {
         )
         log.warn('review session blind: route failing with no fallback configured', { sessionId, ...info })
       },
-      onNote: (note: SupervisorNote) => {
+      onNote: (note: SupervisorNote, categories?: readonly string[]) => {
         const channel = delivery.raise(sessionId, note)
         state.recordAlert(sessionId, note, channel)
         syncArmed(sessionId)
-        log.debug('note raised', { sessionId, severity: note.severity, channel })
+        log.debug('note raised', { sessionId, severity: note.severity, channel, categories })
       },
       onStateChange: (next) => {
         state.setSession(sessionId, { reviewer: next })

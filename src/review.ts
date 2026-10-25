@@ -4,7 +4,7 @@
 // errors get one retry, quota/permanent errors park the session, and the
 // backlog is bounded so a dead model cannot grow memory without limit.
 
-import { buildGateHint, CONTRACT_REMINDER, CONTENT_FREE_PHRASES, normalizeNote } from './prompts.js'
+import { buildGateHint, CONTRACT_REMINDER, CONTENT_FREE_PHRASES, normalizeNote, PROBLEM_CATEGORIES } from './prompts.js'
 import { isNote, type SupervisorNote } from './kinds.js'
 import { EmissionGuard } from './guard.js'
 import type { TranscriptDelta } from './transcript.js'
@@ -67,9 +67,11 @@ export interface ReviewerOptions {
    * Gate-vs-LLM agreement, for calibrating the gate threshold. `cleared`: the
    * gate said clear and (skipping off) the delta was reviewed anyway.
    * `false_clear`: that review then raised a note — a measured gate miss, not
-   * a guess. Free while skipping stays off.
+   * a guess. Free while skipping stays off. `false_clear` carries the note's
+   * self-reported categories so the ledger shows which categories the gate
+   * systematically misses; an empty list means the route did not report them.
    */
-  readonly onGateStat?: (stat: 'cleared' | 'false_clear' | 'flagged' | 'flag_confirmed') => void
+  readonly onGateStat?: (stat: 'cleared' | 'false_clear' | 'flagged' | 'flag_confirmed', categories?: readonly string[]) => void
   /**
    * Blind-spot fix: after this many consecutive transient failures on the
    * session's own route, reviews switch to the fallback route instead of
@@ -98,7 +100,9 @@ export interface ReviewerOptions {
    * visible, not just a counter in the ledger.
    */
   onBlind?: (info: { errors: number; route?: ReviewerRoute }) => void
-  readonly onNote: (note: SupervisorNote) => void
+  /** A note survived the emission guard. `categories` are the note's
+   *  self-reported problem-category ids (empty when the route omitted them). */
+  readonly onNote: (note: SupervisorNote, categories?: readonly string[]) => void
   readonly onStateChange?: (state: ReviewerState) => void
   /** `reply` is set for `unparseable` so callers can surface what came back;
    *  `reason` says which parse exit produced it; `failure` (for error-family
@@ -113,13 +117,16 @@ export type ReviewerState = 'idle' | 'working' | 'no_route' | 'quota_exhausted' 
  *  this so the next fix targets the exit that actually leaks. */
 export type ParseFailReason = 'no_frame' | 'json_error' | 'empty_note' | 'bad_shape'
 
+/** The seven review categories, for validating self-reported ids. */
+const KNOWN_CATEGORY_IDS: ReadonlySet<string> = new Set(PROBLEM_CATEGORIES.map((c) => c.id))
+
 type ParseResult =
   | { readonly kind: 'unparseable'; readonly reason: ParseFailReason }
   | { readonly kind: 'silent' }
-  | { readonly kind: 'note'; readonly note: SupervisorNote }
+  | { readonly kind: 'note'; readonly note: SupervisorNote; readonly categories: readonly string[] }
 
 /** What one model call produced, plus the raw text when it could not be parsed. */
-type CallResult = { readonly outcome: ReviewOutcome; readonly reply?: string; readonly reason?: ParseFailReason }
+type CallResult = { readonly outcome: ReviewOutcome; readonly reply?: string; readonly reason?: ParseFailReason; readonly categories?: readonly string[] }
 
 const DEFAULT_CALL_TIMEOUT_MS = 120_000
 const DEFAULT_MAX_BACKLOG = 16
@@ -132,6 +139,8 @@ const UNPARSEABLE_NUDGE =
 interface Frame {
   note?: unknown
   severity?: unknown
+  /** Self-reported problem-category ids (contract addition, optional). */
+  categories?: unknown
 }
 
 /** Locate the first balanced `{…}`, tolerating prose and markdown fences. */
@@ -358,7 +367,9 @@ export class Reviewer {
           this.consecutiveErrors = 0
           // Route is healthy again: a later outage deserves a fresh warning.
           this.blindReported = false
-          if (gateCleared && result.outcome === 'note') this.options.onGateStat?.('false_clear')
+          if (gateCleared && result.outcome === 'note') {
+            this.options.onGateStat?.('false_clear', result.categories ?? [])
+          }
           // Co-occurrence, not attribution: a note on a flagged delta confirms
           // the lead *may* have paid off; a silent one vetoes it. Either way the
           // hit side of the gate becomes measurable, which it never was.
@@ -530,8 +541,8 @@ export class Reviewer {
             this.options.logger?.debug?.('note suppressed by emission guard')
             return { outcome: 'suppressed' }
           }
-          this.options.onNote(parsed.note)
-          return { outcome: 'note' }
+          this.options.onNote(parsed.note, parsed.categories)
+          return { outcome: 'note', categories: parsed.categories }
         }
         const reply = text.slice(0, 200) || `<empty reply, finish=${finishKind}>`
         if (parseAttempt === 0) {
@@ -567,6 +578,13 @@ export class Reviewer {
     const candidate: SupervisorNote = { note: clipped, severity }
     if (!isNote(candidate)) return { kind: 'unparseable', reason: 'bad_shape' }
     if (CONTENT_FREE_PHRASES.has(normalizeNote(clipped))) return { kind: 'silent' }
-    return { kind: 'note', note: candidate }
+    // Self-reported categories, filtered to the seven known ids (anything else
+    // is dropped, so a hallucinated id cannot pollute the calibration ledger).
+    // Absent on routes that predate the field — the ledger buckets those as
+    // `unknown` rather than losing the sample.
+    const categories = Array.isArray(parsed.categories)
+      ? parsed.categories.filter((c: unknown): c is string => typeof c === 'string' && KNOWN_CATEGORY_IDS.has(c))
+      : []
+    return { kind: 'note', note: candidate, categories }
   }
 }

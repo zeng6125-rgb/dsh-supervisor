@@ -435,6 +435,46 @@ test('reviewer sends captured images with the review and drains them once', asyn
   assert.equal(llm.calls[1].messages[0].content.length, 1, 'drained: the second review is text-only')
 })
 
+test('a note self-reports its categories, and false clears record them', async () => {
+  // The gate ledger answers "which problem class does the gate miss" only if
+  // notes carry their categories; unknown ids are dropped, and a route that
+  // omits the field entirely still counts as `unknown` rather than breaking.
+  const state = new SupervisorState()
+  const notes = []
+  const gateStats = []
+  const llm = fakeLlm([[
+    JSON.stringify({ note: 'done_then_changed: 完工后又改文件', severity: 'concern', categories: ['done_then_changed', 'hallucinated_id'] }),
+  ]])
+  const { r } = reviewer(llm, {
+    gate: { screen: async () => ({ kind: 'clear' }) },
+    onNote: (note, categories) => notes.push({ note, categories }),
+    onGateStat: (stat, categories) => gateStats.push({ stat, categories }),
+    onOutcome: (outcome) => state.recordReview('s1', outcome),
+  })
+  r.enqueue(delta('a'))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(notes.length, 1)
+  assert.deepEqual(notes[0].categories, ['done_then_changed'], 'hallucinated id filtered out')
+  assert.equal(gateStats[0].stat, 'cleared', 'the clear side is booked first')
+  assert.deepEqual(gateStats[1], { stat: 'false_clear', categories: ['done_then_changed'] })
+  // The reviewer's own stat went to `gateStats`, not the ledger; the ledger
+  // lines below are recorded directly (state wiring is covered elsewhere).
+  state.recordGate('s1', 'false_clear', ['done_then_changed'])
+  state.recordGate('s1', 'false_clear', [])
+  state.recordGate('s1', 'false_clear', undefined)
+  assert.deepEqual(state.totals().falseClearsByCat, { done_then_changed: 1, unknown: 2 }, 'empty/missing lists land in unknown')
+})
+
+test('a note without the categories field still parses (contract back-compat)', async () => {
+  const notes = []
+  const llm = fakeLlm([[JSON.stringify({ note: 'ungrounded claim: 没验证就说', severity: 'blocker' })]])
+  const { r } = reviewer(llm, { onNote: (note, categories) => notes.push({ note, categories }) })
+  r.enqueue(delta('a'))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(notes.length, 1)
+  assert.deepEqual(notes[0].categories, [], 'older routes simply report none')
+})
+
 test('reviewer tolerates prose and fences around the frame', async () => {
   const llm = fakeLlm([['Sure!\n```json\n{"note":"off task: the user asked for tests","severity":"blocker"}\n```\nDone.']])
   const { r, notes } = reviewer(llm)

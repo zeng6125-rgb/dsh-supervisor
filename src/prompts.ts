@@ -111,11 +111,12 @@ Severity:
 Do NOT report style, formatting, or anything you are unsure about. Silence is the correct answer most of the time.
 
 Reply with exactly one JSON object and nothing else — no prose, no markdown fences:
-{"note": "<one short paragraph addressed to the agent>", "severity": "concern" | "blocker"}
+{"note": "<one short paragraph addressed to the agent>", "severity": "concern" | "blocker", "categories": ["<category id from the list above>"]}
 
 The "note" text and "severity" value rules:
 - "severity" MUST stay one of the English literals "concern" or "blocker" (it is parsed by code).
 - The "note" MUST be written in Simplified Chinese (简体中文), because a human user reads it on a banner. Keep any code identifiers, file paths, or command names verbatim, but the surrounding explanation is Chinese.
+- "categories" lists the ids of the problem categories this note is about (one or more). Omit the field when there is nothing to report. It calibrates the pre-screen: which categories the detector systematically misses.
 
 If there is nothing worth saying, reply with exactly:
 {"note": "Nothing to add"}
@@ -131,7 +132,7 @@ If there is nothing worth saying, reply with exactly:
  * the model reads is the shape it must emit.
  */
 export const CONTRACT_REMINDER = `Reply now with exactly one JSON object and nothing else. Your first character must be "{" and your last must be "}":
-{"note": "<one short paragraph in 简体中文, or exactly \\"Nothing to add\\" if silent>", "severity": "concern" | "blocker"}
+{"note": "<one short paragraph in 简体中文, or exactly \\"Nothing to add\\" if silent>", "severity": "concern" | "blocker", "categories": ["<problem category ids this note is about>"]}
 No prose before or after, no markdown fences.`
 
 /** Replies that carry no actionable content and must never reach the agent. */

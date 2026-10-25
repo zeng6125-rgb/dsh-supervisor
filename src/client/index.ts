@@ -45,7 +45,7 @@ interface Snapshot {
   enabled?: boolean
   intercept?: boolean
   stepsBetweenReviews?: number
-  totals?: { sessions: number; steps: number; reviews: number; notes: number; unhealthy: number; outcomes: Record<string, number>; parseFails?: Record<string, number>; parseFailsByRoute?: Record<string, Record<string, number>>; errorKinds?: Record<string, number>; gateByRoute?: Record<string, { cleared: number; falseClears: number; flagged: number; confirmed: number; reviews: number }>; gate?: { cleared: number; falseClears: number; flagged: number; confirmed: number } }
+  totals?: { sessions: number; steps: number; reviews: number; notes: number; unhealthy: number; outcomes: Record<string, number>; parseFails?: Record<string, number>; parseFailsByRoute?: Record<string, Record<string, number>>; errorKinds?: Record<string, number>; falseClearsByCat?: Record<string, number>; gateByRoute?: Record<string, { cleared: number; falseClears: number; flagged: number; confirmed: number; reviews: number }>; gate?: { cleared: number; falseClears: number; flagged: number; confirmed: number } }
   alerts?: Alert[]
   sessions?: SessionState[]
   error?: string
@@ -407,6 +407,18 @@ var KIND_ZH: Record<string, string> = {
   aborted: '中断',
   'server-5xx': '服务端 5xx',
   other: '其他',
+}
+
+/** Review category ids (PROBLEM_CATEGORIES in prompts.ts), for the gate line. */
+var CAT_ZH: Record<string, string> = {
+  read_selectively: '选择性读',
+  unsaid_finding: '隐瞒发现',
+  ungrounded_claim: '无据断言',
+  untried_impossible: '没试就说不行',
+  scope_creep: '范围蔓延',
+  blind_tuning: '盲调',
+  done_then_changed: '完工又改',
+  unknown: '未报类',
 }
 
 function relative(at: number, now: number): string {
@@ -1094,6 +1106,17 @@ function Status(props: { live: Snapshot; titleOf?: (sessionId: string) => string
         if (n) kindParts.push(KIND_ZH[kind] || kind + ' ' + n)
       }
       if (kindParts.length) outcomes.push('失败 ' + kindParts.join(' · '))
+    }
+    // Which categories the gate's misses were about: a concentration on one
+    // class is a prompt fix, an even spread is a threshold fix.
+    var cats = totals.falseClearsByCat
+    if (cats) {
+      var catParts: string[] = []
+      for (var cat of Object.keys(cats)) {
+        var cn = cats[cat]
+        if (cn) catParts.push((CAT_ZH[cat] || cat) + ' ' + cn)
+      }
+      if (catParts.length) outcomes.push('误放类别 ' + catParts.join(' · '))
     }
   }
 

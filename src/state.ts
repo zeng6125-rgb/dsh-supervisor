@@ -49,6 +49,10 @@ export interface SupervisorSessionState {
    *  deltas the gate hit on, `confirmed` the subset where the review then
    *  raised a note — the hit side of the ledger, co-occurrence not attribution. */
   readonly gate?: { readonly cleared: number; readonly falseClears: number; readonly flagged: number; readonly confirmed: number }
+  /** Which categories the false clears were about (note self-report; `unknown`
+   *  when the route did not report any). Answers "which problem class does the
+   *  gate systematically miss" without a contract break on older routes. */
+  readonly falseClearsByCat?: Readonly<Record<string, number>>
   readonly armed: boolean
 }
 
@@ -66,6 +70,7 @@ interface PersistedSession {
   route?: { provider: string; model: string }
   parseFails?: Record<string, number>
   errorKinds?: Record<string, number>
+  falseClearsByCat?: Record<string, number>
   gate?: { cleared: number; falseClears: number; flagged?: number; confirmed?: number }
 }
 
@@ -100,6 +105,7 @@ export class SupervisorState {
           ...(saved.route ? { route: { ...saved.route } } : {}),
           ...(saved.parseFails ? { parseFails: { ...saved.parseFails } } : {}),
           ...(saved.errorKinds ? { errorKinds: { ...saved.errorKinds } } : {}),
+          ...(saved.falseClearsByCat ? { falseClearsByCat: { ...saved.falseClearsByCat } } : {}),
           ...(saved.gate
             ? {
                 gate: {
@@ -203,11 +209,22 @@ export class SupervisorState {
   }
 
   /** One gate-vs-LLM agreement sample, for threshold calibration. */
-  recordGate(sessionId: string, stat: 'cleared' | 'false_clear' | 'flagged' | 'flag_confirmed'): void {
+  recordGate(sessionId: string, stat: 'cleared' | 'false_clear' | 'flagged' | 'flag_confirmed', categories?: readonly string[]): void {
     const current = this.base(sessionId)
     const gate = current.gate ?? { cleared: 0, falseClears: 0, flagged: 0, confirmed: 0 }
+    // A false clear's categories show which problem class the gate missed.
+    // An unreported (or hallucinated-to-empty) list lands in `unknown` so the
+    // sample still counts.
+    let falseClearsByCat = current.falseClearsByCat
+    if (stat === 'false_clear') {
+      const keys = categories && categories.length > 0 ? categories : ['unknown']
+      const next = { ...(falseClearsByCat ?? {}) }
+      for (const key of keys) next[key] = (next[key] ?? 0) + 1
+      falseClearsByCat = next
+    }
     this.sessions.set(sessionId, {
       ...current,
+      ...(falseClearsByCat ? { falseClearsByCat } : {}),
       gate: {
         cleared: gate.cleared + (stat === 'cleared' ? 1 : 0),
         falseClears: gate.falseClears + (stat === 'false_clear' ? 1 : 0),
@@ -272,6 +289,9 @@ export class SupervisorState {
     parseFailsByRoute: Record<string, Record<string, number>>
     /** Failed reviews by fingerprint (`timeout`, `rate-limit`, …). */
     errorKinds: Record<string, number>
+    /** Categories the gate's false clears were about (`unknown` when the
+     *  reviewing route did not self-report). */
+    falseClearsByCat: Record<string, number>
     /** Gate agreement keyed by route, each bucket carrying its `reviews`
      *  denominator: a 1/1 miss is not a 100% miss rate. A rising miss rate
      *  concentrated on one route is a prompt problem; spread evenly it is a
@@ -283,6 +303,7 @@ export class SupervisorState {
     const parseFails: Record<string, number> = {}
     const parseFailsByRoute: Record<string, Record<string, number>> = {}
     const errorKinds: Record<string, number> = {}
+    const falseClearsByCat: Record<string, number> = {}
     const gateByRoute: Record<string, { cleared: number; falseClears: number; flagged: number; confirmed: number; reviews: number }> = {}
     const gate = { cleared: 0, falseClears: 0, flagged: 0, confirmed: 0 }
     let steps = 0
@@ -312,6 +333,9 @@ export class SupervisorState {
       for (const [kind, count] of Object.entries(session.errorKinds ?? {})) {
         errorKinds[kind] = (errorKinds[kind] ?? 0) + count
       }
+      for (const [cat, count] of Object.entries(session.falseClearsByCat ?? {})) {
+        falseClearsByCat[cat] = (falseClearsByCat[cat] ?? 0) + count
+      }
     }
     const unhealthy = UNHEALTHY_OUTCOMES.reduce((sum, outcome) => sum + (outcomes[outcome] ?? 0), 0)
     return {
@@ -324,6 +348,7 @@ export class SupervisorState {
       parseFails,
       parseFailsByRoute,
       errorKinds,
+      falseClearsByCat,
       gateByRoute,
       gate,
     }
@@ -356,6 +381,7 @@ export class SupervisorState {
         ...(session.route ? { route: { ...session.route } } : {}),
         ...(session.parseFails ? { parseFails: { ...session.parseFails } } : {}),
         ...(session.errorKinds ? { errorKinds: { ...session.errorKinds } } : {}),
+        ...(session.falseClearsByCat ? { falseClearsByCat: { ...session.falseClearsByCat } } : {}),
         ...(session.gate ? { gate: { ...session.gate } } : {}),
       }
     }
