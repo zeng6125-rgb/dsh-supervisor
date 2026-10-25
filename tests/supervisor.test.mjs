@@ -1040,6 +1040,19 @@ test('re-queue failure does not lose the note', async () => {
   assert.equal(agent.steered.length, 1, 'the note still reaches the agent')
 })
 
+test('a note for a closed turn is injected, never armed (no extra output)', () => {
+  // Reported symptom: after the final summary, the reviewer still produced one
+  // more turn of output. Root cause: the review ran after turn/end, armed, and
+  // held the next turn's first step. A closed-turn note must only inject.
+  const agent = fakeAgent()
+  const { d } = delivery(true, agent)
+  const channel = d.deliverClosedTurn(sid, note('late note'))
+  assert.equal(channel, 'delivered')
+  assert.equal(agent.injected.length, 1)
+  assert.equal(d.isArmed(sid), false, 'nothing is armed, so no step can be held')
+  assert.equal(d.interceptStep(sid, deliveryAgent(agent), [{ id: 'u1' }]), false)
+})
+
 test('unregister clears the armed gate', () => {
   const agent = fakeAgent()
   const { d } = delivery(true, agent)

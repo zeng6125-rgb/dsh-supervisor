@@ -103,6 +103,17 @@ export class SupervisorDelivery {
   }
 
   /**
+   * The turn this note reviews has already completed: inject it as a silent
+   * notice regardless of the intercept setting. Arming would hold a step of
+   * the *next* turn — an extra output the user never asked for. Returns the
+   * channel it rode (`dropped` when no agent is reachable).
+   */
+  deliverClosedTurn(sessionId: string, note: SupervisorNote): 'delivered' | 'dropped' {
+    this.options.logger?.debug?.('note delivered for a closed turn', { sessionId, severity: note.severity })
+    return this.deliver(sessionId, note) ? 'delivered' : 'dropped'
+  }
+
+  /**
    * A note survived the emission guard. With interception on, hold the next
    * step for it; otherwise route the notice straight into the running work.
    */

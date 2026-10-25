@@ -194,6 +194,9 @@ export function apply(ctx0: Context, config?: unknown): void {
   /** Image notes already folded into the transcript, per session (one request
    *  per step repeats the whole history, so notes must be de-duplicated). */
   const imageNotes = new Map<string, Set<string>>()
+  /** Sessions whose last turn ended `completed`: a review note arriving now
+   *  belongs to finished work, so it must not arm a gate for the next turn. */
+  const turnClosed = new Set<string>()
   /** Bytes of request-side images, drained by the reviewer per call (the
    *  reviewer looks at what the user actually attached, then they clear). */
   const pendingImages = new Map<string, Array<{ mediaType: string; data: string }>>()
@@ -281,7 +284,12 @@ export function apply(ctx0: Context, config?: unknown): void {
         log.warn('review session blind: route failing with no fallback configured', { sessionId, ...info })
       },
       onNote: (note: SupervisorNote, categories?: readonly string[]) => {
-        const channel = delivery.raise(sessionId, note)
+        // The turn this note reviews has already ended: injecting is still
+        // right (the advice lands in the trajectory), but arming would hold a
+        // step of the NEXT turn — the extra output the user reported.
+        const channel = turnClosed.has(sessionId)
+          ? delivery.deliverClosedTurn(sessionId, note)
+          : delivery.raise(sessionId, note)
         state.recordAlert(sessionId, note, channel)
         syncArmed(sessionId)
         log.debug('note raised', { sessionId, severity: note.severity, channel, categories })
@@ -308,8 +316,11 @@ export function apply(ctx0: Context, config?: unknown): void {
   const transcript = new SessionTranscript({
     stepsBetweenReviews: cfg.stepsBetweenReviews,
     maxDeltaMessages: cfg.maxDeltaMessages,
-    onStepEnd: (sessionId) => {
+    onStepEnd: (sessionId, turn, step) => {
       state.bump(sessionId, 'steps')
+      // A step after a completed turn means the conversation moved on: the
+      // next note may hold a step again (the user asked for work, not a fold).
+      turnClosed.delete(sessionId)
     },
     onRewrite: (sessionId) => {
       // Compaction rewrote the surface: buffered transcript and any held gate
@@ -320,11 +331,16 @@ export function apply(ctx0: Context, config?: unknown): void {
     },
     // A completed turn is the conversation's own ending: holding the next step
     // would fold the final output the user just read into an extra turn that
-    // only exists to carry our note. Release the gate as a silent inject
-    // instead — the summary stays whole and the advice still lands. Any later
-    // step re-arms naturally through the normal delivery path.
+    // only exists to carry our note. Two things happen here:
+    //   1. flush the pending delta now — waiting for the step threshold would
+    //      push the review into the NEXT turn, where its note would arm and
+    //      hold a step the user never asked for (the reported symptom);
+    //   2. mark the turn closed so a note that arrives after this point goes
+    //      straight to silent inject instead of arming a gate.
     onTurnEnd: (sessionId, turn, reason) => {
       if (reason !== 'completed') return
+      turnClosed.add(sessionId)
+      transcript.flushNow(sessionId)
       const released = delivery.releaseAtTurnEnd(sessionId)
       if (released) {
         // The alert was recorded as `armed` when raised; re-channel it to what
@@ -346,6 +362,7 @@ export function apply(ctx0: Context, config?: unknown): void {
     reviewers.delete(sessionId)
     routes.delete(sessionId)
     imageNotes.delete(sessionId)
+    turnClosed.delete(sessionId)
     pendingImages.delete(sessionId)
     delivery.unregisterAgent(sessionId)
     state.dropSession(sessionId)
