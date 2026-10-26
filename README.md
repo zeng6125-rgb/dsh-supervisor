@@ -16,7 +16,7 @@ An **observer-reviewer** attached to your DSH agent: every N steps, a second mod
 
 - **七类真问题 / 7 real categories** — 只盯：选择性读、隐瞒发现、无据断言、没试就说做不到、悄悄扩范围、盲调、宣布完工又改。不报风格，不报猜测。
 - **jev 检测门 / typed pre-screen** — 审查前先过一道 jev 快筛（公共工具，只调用不改造），命中的类别作为线索拼进提示词；门与 LLM 的分歧双向记账（`cleared / falseClears / flagged / confirmed`），阈值校准有据可依。
-- **静默注入 / silent inject** — 提醒默认直接注入进行中的工作（不唤醒、不开新回合、零渲染干扰）；「先拦一次」为可选的拦截模式。
+- **不打断当前轮 / queue & attach** — 提醒先排队，只在「比所审轮次更晚的轮次」首个 step 追加进消息尾部（不注入、不唤醒、不 reject、不重排），保留请求前缀缓存；「下一步即附加」为可选的即时模式。
 - **解析归因账本 / parse-fail ledger** — 每次审查的结局逐档记账，`unparseable` 按最终解析出口拆分（`no_frame / json_error / empty_note / bad_shape`），提示词优化不靠猜。
 - **回退路由 + 失明提醒 / fallback + blindness alert** — 审查路由连续失败自动切到配置的回退路由；没配回退时面板亮 blocker 告诉你该配什么。
 - **全功能设置页 / full settings page** — 设置 → 审查员：分组卡片、开关、live 账本，自建读写链路（configEditor 落盘，改完即生效）。
@@ -39,7 +39,7 @@ An **observer-reviewer** attached to your DSH agent: every N steps, a second mod
 
 ## 配置 / Configuration
 
-全部设置收口在 **设置 → 审查员**（审查间隔、先拦一次、jev 门、省钱模式、回退路由、预算上限……），改完即时生效，无需重载。完整文档见 **[README.full.md](README.full.md)**（中文）。
+全部设置收口在 **设置 → 审查员**（审查间隔、下一步即附加、jev 门、省钱模式、回退路由、预算上限……），改完即时生效，无需重载。完整文档见 **[README.full.md](README.full.md)**（中文）。
 
 All settings live in **Settings → 审查员** and apply live without a reload. Full documentation: [README.full.md](README.full.md) (Chinese).
 
@@ -53,7 +53,7 @@ BSD-3-Clause
 
 ## English
 
-**dsh-supervisor** is an observer-reviewer for DeepSeek Harness agents. Every `stepsBetweenReviews` steps it re-reads the recent transcript with the session's own model and reports only seven problem categories (selective reading, hidden findings, ungrounded claims, claiming impossibility without trying, silent scope creep, blind tuning, done-then-changed). Notes are injected silently into the running work — the reviewer never approves, vetoes, or commands.
+**dsh-supervisor** is an observer-reviewer for DeepSeek Harness agents. Every `stepsBetweenReviews` steps it re-reads the recent transcript with the session's own model and reports only seven problem categories (selective reading, hidden findings, ungrounded claims, claiming impossibility without trying, silent scope creep, blind tuning, done-then-changed). Notes are queued and appended to the first step of a *later* turn — never injected into the in-flight work, never woken, never rejected — so the conversation stays continuous and the prefix cache survives. The reviewer never approves, vetoes, or commands.
 
 A typed pre-screen (jev) runs first and feeds hits into the review prompt as leads; gate-vs-LLM agreement is double-entry-bookkept (`cleared`/`falseClears`/`flagged`/`confirmed`) so thresholds are calibrated on measured misses, not vibes. Every review outcome is ledgered per session, `unparseable` replies are split by their final parse exit, a failing review route switches to a configured fallback (or raises a panel alert when none is configured), and every setting is editable — and persisted — from a first-class Settings page.
 

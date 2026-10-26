@@ -20,48 +20,6 @@ const sid = 'session-test'
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-function fakeAgent(sessionId = sid) {
-  const inbox = []
-  return {
-    id: sessionId,
-    status: 'running',
-    inbox,
-    steered: [],
-    injected: [],
-    get hasPending() {
-      return inbox.length > 0
-    },
-  }
-}
-
-/** Wrap a fake agent into the shape SupervisorDelivery expects. */
-function deliveryAgent(agent) {
-  return {
-    id: agent.id,
-    status: agent.status,
-    inbox: {
-      get hasPending() {
-        return agent.inbox.length > 0
-      },
-      prepend(target, message) {
-        assert.equal(target, 'next-step')
-        agent.inbox.unshift(message)
-      },
-    },
-    steer(message) {
-      agent.steered.push(message)
-      agent.inbox.push(message)
-    },
-    inject(message) {
-      agent.injected.push(message)
-      agent.inbox.push(message)
-    },
-    whenIdle() {
-      return Promise.resolve()
-    },
-  }
-}
-
 function fakeLlm(script) {
   return {
     calls: [],
@@ -86,20 +44,16 @@ function fakeLlm(script) {
   }
 }
 
-function delivery(intercept = true, agent) {
+function delivery(intercept = false) {
   const warnings = []
   const d = new SupervisorDelivery({
     intercept,
-    lookupAgent: () => (agent ? deliveryAgent(agent) : undefined),
     createUserMessage: (input) => ({ role: 'user', ...input }),
     boundContextSummary: (summary) => summary,
     logger: { debug() {}, warn(...args) { warnings.push(args) } },
   })
   return { d, warnings }
 }
-
-/** Inbox contents as `id` for re-queued user messages, note text for ours. */
-const inboxIds = (agent) => agent.inbox.map((m) => m.id ?? m.content[0].text)
 
 const note = (text, severity = 'concern') => ({ note: text, severity })
 
@@ -905,201 +859,99 @@ test('resolveConfig carries the fallback route fields', () => {
   assert.equal(set.fallbackAfterErrors, 7)
 })
 
-// ── delivery: the intercept path ─────────────────────────────────────────────
+// ── delivery: queued notes ride a step the agent already enters ─────────────
 
-test('raise arms a gate instead of interrupting', () => {
-  const agent = fakeAgent()
-  const { d, warnings } = delivery(true, agent)
-  const channel = d.raise(sid, note('you are guessing the API shape'))
-  assert.equal(channel, 'armed')
-  assert.equal(d.isArmed(sid), true)
-  assert.equal(agent.steered.length, 0, 'arming says nothing to the agent yet')
-  assert.equal(agent.injected.length, 0)
+test('raise queues the note without waking, injecting or holding anything', () => {
+  const { d, warnings } = delivery()
+  assert.equal(d.raise(sid, note('you are guessing the API shape')), 'pending')
+  assert.equal(d.hasPending(sid), true)
   assert.equal(warnings.length, 0)
 })
 
-test('without interception, raise delivers straight away', () => {
-  const agent = fakeAgent()
-  const { d } = delivery(false, agent)
-  assert.equal(d.raise(sid, note('heads up')), 'delivered')
-  assert.equal(d.isArmed(sid), false)
-  assert.equal(agent.injected.length, 1, 'a running agent gets context, not a wake')
-  assert.equal(agent.steered.length, 0)
-})
-
-test('an idle agent is injected into, never woken (silent by default)', () => {
-  const agent = fakeAgent()
-  agent.status = 'idle'
-  const { d } = delivery(false, agent)
-  d.raise(sid, note('heads up'))
-  assert.equal(agent.injected.length, 1, 'the note waits for the next wake instead of opening a turn')
-  assert.equal(agent.steered.length, 0)
-})
-
-test('the delivered message is tagged, prefixed and summarised', () => {
-  const agent = fakeAgent()
-  const { d } = delivery(false, agent)
-  d.raise(sid, note('you are guessing the flag exists', 'blocker'))
-  const message = agent.injected[0]
+test('a note waits for a later turn: same-turn steps pass untouched, the next turn carries it', () => {
+  const { d } = delivery()
+  d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u1' }] }, 1) // turn 1 in flight
+  d.raise(sid, note('heads up')) // anchored to turn 1
+  const sameTurn = d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u2' }] }, 1)
+  assert.equal(sameTurn.messages.length, 1, 'in-flight work is not interrupted mid-turn')
+  const nextTurn = d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u3' }] }, 2)
+  assert.equal(nextTurn.messages.length, 2, 'the user already asked for the next turn: it rides it')
+  const message = nextTurn.messages[1]
   assert.equal(message.role, 'user')
   assert.equal(message.source.kind, 'supervisor')
   assert.equal(message.source.form, 'notice')
-  assert.equal(message.content[0].text, '[supervisor:blocker] you are guessing the flag exists')
-  assert.equal(message.source.summary, 'blocker] you are guessing the flag exists')
+  assert.equal(message.content[0].text, '[supervisor:concern] heads up')
+  assert.equal(message.source.summary, 'concern] heads up')
+  assert.equal(d.hasPending(sid), false)
 })
 
-test('a missing agent drops the note without throwing', () => {
-  const { d, warnings } = delivery(false, undefined)
-  assert.equal(d.raise(sid, note('nobody home')), 'dropped')
-  assert.equal(warnings.length, 1)
+test('the attached decision keeps startsRequestSeries so the cached prefix survives', () => {
+  const { d } = delivery()
+  d.attachToStep(sid, { kind: 'enter', messages: [] }, 1)
+  d.raise(sid, note('heads up'))
+  const attached = d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u2' }], startsRequestSeries: true }, 2)
+  assert.equal(attached.kind, 'enter')
+  assert.equal(attached.startsRequestSeries, true, 'the request series — and the provider prefix cache — survive the attach')
 })
 
-test('interceptStep re-queues the claimed batch in order and resumes', async () => {
-  const agent = fakeAgent()
-  const { d } = delivery(true, agent)
-  d.raise(sid, note('you are guessing the flag exists'))
-  assert.equal(d.isArmed(sid), true)
-
-  const claimed = [{ id: 'u1', text: 'first' }, { id: 'u2', text: 'second' }, { id: 'u3', text: 'third' }]
-  const held = d.interceptStep(sid, deliveryAgent(agent), claimed)
-  assert.equal(held, true, 'the caller must reject this step')
-
-  // The user's own messages come back, in order, ahead of the note.
-  assert.deepEqual(agent.inbox.map((m) => m.id ?? m.content[0].text), ['u1', 'u2', 'u3'])
-  assert.equal(d.isArmed(sid), false, 'the gate is consumed by the hold')
-
-  await new Promise((resolve) => setTimeout(resolve, 10))
-  assert.equal(agent.steered.length, 1, 'resume wakes the driver with the note attached')
-  assert.match(agent.steered[0].content[0].text, /^\[supervisor:concern\] you are guessing/)
-  assert.deepEqual(agent.inbox.map((m) => m.id ?? m.content[0].text), ['u1', 'u2', 'u3', '[supervisor:concern] you are guessing the flag exists'])
+test('intercept attaches on the very next step, without stopping the work', () => {
+  const { d } = delivery(true)
+  d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u1' }] }, 1)
+  d.raise(sid, note('urgent'))
+  const attached = d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u2' }] }, 1)
+  assert.equal(attached.messages.length, 2, 'the note rides the next step of the same turn')
 })
 
-test('the second pass is not held again', async () => {
-  const agent = fakeAgent()
-  const { d } = delivery(true, agent)
-  d.raise(sid, note('problem A'))
-  assert.equal(d.interceptStep(sid, deliveryAgent(agent), [{ id: 'u1' }]), true)
-  await new Promise((resolve) => setTimeout(resolve, 10))
-  agent.inbox.length = 0
-  agent.steered.length = 0
-  // Same session, next step: nothing is armed, so the step passes.
-  assert.equal(d.interceptStep(sid, deliveryAgent(agent), [{ id: 'u2' }]), false)
-  assert.equal(agent.inbox.length, 0)
+test('a reject decision is never rewritten; queued notes append in order', () => {
+  const { d } = delivery(true)
+  d.attachToStep(sid, { kind: 'enter', messages: [] }, 1)
+  assert.equal(d.attachToStep(sid, { kind: 'reject' }, 2).kind, 'reject')
+  d.raise(sid, note('a'))
+  d.raise(sid, note('b'))
+  const attached = d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u1' }] }, 2)
+  assert.deepEqual(
+    attached.messages.map((m) => m.id ?? m.content[0].text),
+    ['u1', '[supervisor:concern] a', '[supervisor:concern] b'],
+  )
 })
 
-test('a second note while armed delivers instead of double-arming', () => {
-  const agent = fakeAgent()
-  const { d } = delivery(true, agent)
-  assert.equal(d.raise(sid, note('problem A')), 'armed')
-  assert.equal(d.raise(sid, note('problem B')), 'delivered')
-  assert.equal(agent.injected.length, 1)
+test('onAttached reports exactly the notes that rode the step', () => {
+  const { d } = delivery(true)
+  d.attachToStep(sid, { kind: 'enter', messages: [] }, 1)
+  d.raise(sid, note('x'))
+  const attached = []
+  d.attachToStep(sid, { kind: 'enter', messages: [] }, 1, (notes) => attached.push(...notes))
+  assert.equal(attached.length, 1)
+  assert.equal(attached[0].note, 'x')
+  // Nothing pending: the callback must not fire.
+  d.attachToStep(sid, { kind: 'enter', messages: [] }, 2, () => assert.fail('nothing pending, nothing attached'))
 })
 
-test('a gate released at turn end is parked, not held and not injected', () => {
-  // The reported failure mode: the final summary was followed by an extra
-  // agent turn whose only content was our advice (an inject wakes the agent).
-  // A completed turn must park the note on the panel: visible, not injected,
-  // and nothing left to hold a step.
-  const agent = fakeAgent()
-  const { d } = delivery(true, agent)
-  d.raise(sid, note('problem A'))
-  assert.equal(d.isArmed(sid), true)
-  const released = d.releaseAtTurnEnd(sid)
-  assert.ok(released, 'the armed gate is released')
-  assert.equal(released.channel, 'panel')
-  assert.equal(agent.injected.length, 0, 'no inject: the conversation stays ended')
-  assert.equal(d.isArmed(sid), false, 'nothing is left to hold a step')
-  // A later step passes normally: no reject, no extra turn.
-  assert.equal(d.interceptStep(sid, deliveryAgent(agent), [{ id: 'u1' }]), false)
+test('clear forgets queued notes (compaction or teardown)', () => {
+  const { d } = delivery()
+  d.attachToStep(sid, { kind: 'enter', messages: [] }, 1)
+  d.raise(sid, note('stale'))
+  d.clear(sid)
+  assert.equal(d.hasPending(sid), false)
+  const passed = d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u' }] }, 2)
+  assert.equal(passed.messages.length, 1)
 })
 
-test('releaseAtTurnEnd is a no-op when nothing is armed', () => {
-  const agent = fakeAgent()
-  const { d } = delivery(true, agent)
-  assert.equal(d.releaseAtTurnEnd(sid), undefined)
-  assert.equal(agent.injected.length, 0)
+test('setIntercept flips the attach cadence without losing queued notes', () => {
+  const { d } = delivery()
+  d.attachToStep(sid, { kind: 'enter', messages: [] }, 3)
+  d.raise(sid, note('later')) // anchored to turn 3: would wait for turn 4
+  d.setIntercept(true)
+  const attached = d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u' }] }, 3)
+  assert.equal(attached.messages.length, 2, 'with intercept on, the same turn carries it')
 })
 
-test('interceptStep is a no-op when nothing is armed', () => {
-  const agent = fakeAgent()
-  const { d } = delivery(true, agent)
-  assert.equal(d.interceptStep(sid, deliveryAgent(agent), [{ id: 'u1' }]), false)
-  assert.equal(agent.inbox.length, 0)
-})
+// ── end to end: counting → review → queue → attach ───────────────────────────
 
-test('re-queue failure does not lose the note', async () => {
-  const agent = fakeAgent()
-  const { d, warnings } = delivery(true, agent)
-  d.raise(sid, note('problem A'))
-  const broken = deliveryAgent(agent)
-  broken.inbox.prepend = () => {
-    throw new Error('message "u1" is already pending')
-  }
-  assert.equal(d.interceptStep(sid, broken, [{ id: 'u1' }]), true)
-  assert.ok(warnings.some((args) => /re-queue skipped/.test(args[0])))
-  await new Promise((resolve) => setTimeout(resolve, 10))
-  assert.equal(agent.steered.length, 1, 'the note still reaches the agent')
-})
-
-test('a note for a closed turn parks on the panel — no inject, no extra turn', () => {
-  // Reported symptom (with intercept OFF): after the final summary the agent
-  // still produced one more turn replying to the supervisor's note. Measured
-  // cause: an inject wakes the agent into exactly that turn. So a closed-turn
-  // note parks on the panel only: visible, ackable, conversation stays ended.
-  const agent = fakeAgent()
-  const { d } = delivery(true, agent)
-  const channel = d.deliverClosedTurn(sid, note('late note'))
-  assert.equal(channel, 'panel')
-  assert.equal(agent.injected.length, 0, 'nothing is injected, so no turn is opened')
-  assert.equal(agent.steered.length, 0, 'and the driver is never woken')
-  assert.equal(d.isArmed(sid), false)
-  assert.equal(d.interceptStep(sid, deliveryAgent(agent), [{ id: 'u1' }]), false)
-})
-
-test('a gate armed when the turn completes parks instead of injecting', () => {
-  // Same rule for the intercept path: the note survives (panel + alert), the
-  // conversation does not gain a turn whose only content is our advice.
-  const agent = fakeAgent()
-  const { d } = delivery(true, agent)
-  d.raise(sid, note('problem A'))
-  const released = d.releaseAtTurnEnd(sid)
-  assert.ok(released)
-  assert.equal(released.channel, 'panel')
-  assert.equal(agent.injected.length, 0)
-  assert.equal(agent.steered.length, 0)
-  assert.equal(d.isArmed(sid), false)
-})
-
-test('unregister clears the armed gate', () => {
-  const agent = fakeAgent()
-  const { d } = delivery(true, agent)
-  d.raise(sid, note('problem A'))
-  d.unregisterAgent(sid)
-  assert.equal(d.isArmed(sid), false)
-})
-
-test('setIntercept(false) releases any held gate', () => {
-  const agent = fakeAgent()
-  const { d } = delivery(true, agent)
-  d.raise(sid, note('problem A'))
-  d.setIntercept(false)
-  assert.equal(d.isArmed(sid), false)
-  assert.equal(d.raise(sid, note('problem B')), 'delivered')
-})
-
-// ── end to end: counting → review → arm → hold ───────────────────────────────
-
-test('six steps produce one armed gate that holds the next step', async () => {
+test('six steps produce one queued note that rides the next turn', async () => {
   const llm = fakeLlm([['{"note":"you are asserting the config key exists without reading it","severity":"concern"}']])
   const notes = []
-  const agent = fakeAgent()
-  const d = new SupervisorDelivery({
-    intercept: true,
-    lookupAgent: () => deliveryAgent(agent),
-    createUserMessage: (input) => ({ role: 'user', ...input }),
-    boundContextSummary: (s) => s,
-    logger: { debug() {}, warn() {} },
-  })
+  const { d } = delivery()
   const r = new Reviewer({
     llm,
     systemPrompt: SUPERVISOR_SYSTEM_PROMPT,
@@ -1121,21 +973,30 @@ test('six steps produce one armed gate that holds the next step', async () => {
   })
 
   t.handleEvent(sid, { type: 'user/message', data: { content: [{ type: 'text', text: 'add a retry flag' }], source: { kind: 'user' } } })
-  for (let step = 1; step <= 5; step += 1) t.handleEvent(sid, stepEnd(1, step))
+  for (let step = 1; step <= 5; step += 1) {
+    // The real pre-step listener records every turn entering a step; without
+    // this the note would anchor to turn 0 and fire on the first step.
+    d.attachToStep(sid, { kind: 'enter', messages: [{ id: `u${step}` }] }, 1)
+    t.handleEvent(sid, stepEnd(1, step))
+  }
   assert.equal(llm.calls.length, 0, 'five steps: no review yet')
   t.handleEvent(sid, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'the flag is --retry, I am sure' }] } } })
+  d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u6' }] }, 1)
   t.handleEvent(sid, stepEnd(1, 6))
 
   await new Promise((resolve) => setTimeout(resolve, 40))
   assert.equal(llm.calls.length, 1)
   assert.equal(notes.length, 1)
-  assert.equal(d.isArmed(sid), true, 'the note is held for the next step boundary')
-  assert.equal(agent.steered.length + agent.injected.length, 0, 'nothing said to the agent yet')
-
-  assert.equal(d.interceptStep(sid, deliveryAgent(agent), [{ id: 'u9', text: 'queued work' }]), true)
-  await new Promise((resolve) => setTimeout(resolve, 10))
-  assert.equal(agent.steered.length, 1, 'the hold is followed by the note')
-  assert.deepEqual(inboxIds(agent), ['u9', '[supervisor:concern] you are asserting the config key exists without reading it'])
+  // The agent enters step boundaries of its own turn (the pre-step listener
+  // records them); the note must not ride THIS turn.
+  d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u6' }] }, 1)
+  assert.equal(d.hasPending(sid), true, 'the note waits for a later turn')
+  const decision = d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u7' }] }, 2)
+  assert.deepEqual(
+    decision.messages.map((m) => m.id ?? m.content[0].text),
+    ['u7', '[supervisor:concern] you are asserting the config key exists without reading it'],
+  )
+  assert.equal(d.hasPending(sid), false)
 })
 
 // ── jev gate ─────────────────────────────────────────────────────────────────

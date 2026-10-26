@@ -6,8 +6,9 @@ import { dirname } from 'node:path'
 import type { ParseFailReason, ReviewerState, ReviewOutcome } from './review.js'
 import type { SupervisorNote } from './kinds.js'
 
-/** `panel` = plugin-health warning shown to the user only; never injected. */
-export type DeliveryChannel = 'armed' | 'delivered' | 'dropped' | 'panel'
+/** `panel` = plugin-health warning shown to the user only; never injected.
+ *  `pending` = a note waiting to ride a step the agent enters on its own. */
+export type DeliveryChannel = 'pending' | 'delivered' | 'dropped' | 'panel'
 
 export interface SupervisorAlert {
   readonly id: string
@@ -16,7 +17,6 @@ export interface SupervisorAlert {
   readonly note: string
   readonly at: number
   readonly channel: DeliveryChannel
-  readonly intercepted: boolean
   readonly acked: boolean
 }
 
@@ -53,7 +53,8 @@ export interface SupervisorSessionState {
    *  when the route did not report any). Answers "which problem class does the
    *  gate systematically miss" without a contract break on older routes. */
   readonly falseClearsByCat?: Readonly<Record<string, number>>
-  readonly armed: boolean
+  /** A queued note is waiting to ride the next step the agent enters. */
+  readonly pending: boolean
 }
 
 /** Outcomes that mean the reviewer is not doing its job; surfaced as a warning. */
@@ -116,7 +117,7 @@ export class SupervisorState {
                 },
               }
             : {}),
-          armed: false,
+          pending: false,
         })
       }
     } catch {
@@ -132,7 +133,6 @@ export class SupervisorState {
       note: note.note,
       at: Date.now(),
       channel,
-      intercepted: channel === 'armed',
       acked: false,
     }
     this.alerts.unshift(alert)
@@ -152,15 +152,14 @@ export class SupervisorState {
   }
 
   /**
-   * Re-channel the most recent matching `armed` alert instead of appending a
-   * second one: a note raised during intercept and released at turn end is
-   * one piece of advice, and the ledger must not bill it twice.
+   * Re-channel the most recent matching `pending` alert instead of appending a
+   * second one: a note that was waiting to ride a step and whose turn then
+   * completed is one piece of advice, and the ledger must not bill it twice.
    */
   updateAlertChannel(sessionId: string, note: SupervisorNote, channel: DeliveryChannel): void {
     for (const alert of this.alerts) {
-      if (alert.sessionId === sessionId && alert.channel === 'armed' && alert.note === note.note) {
+      if (alert.sessionId === sessionId && alert.channel === 'pending' && alert.note === note.note) {
         ;(alert as { channel: DeliveryChannel }).channel = channel
-        ;(alert as { intercepted: boolean }).intercepted = channel === 'armed'
         return
       }
     }
@@ -244,7 +243,7 @@ export class SupervisorState {
         steps: 0,
         reviews: 0,
         outcomes: {},
-        armed: false,
+        pending: false,
       }
     )
   }

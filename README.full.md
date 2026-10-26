@@ -28,7 +28,7 @@ step/end × N → delta → ① jev 检测门 → ② LLM 审查 → ③ 解析 
 
 ③ **解析**：容错提取第一个平衡的 `{…}`（容忍散文与 markdown fence）。失败按**最终出口**记账：`no_frame` / `json_error` / `empty_note` / `bad_shape`。
 
-④ **投递**：默认恒 `agent.inject`（静默进入会话轨迹，不唤醒、不开新回合）；`intercept` 开启后先拦一次即将进入的 step（reject + 原样重排 + steer），agent 处理完后放行。它只提醒、不授权、不替 agent 做决定。与上一条同级别重复的提醒会被 emission guard 吞掉（`suppressed`）。
+④ **投递（队列 + 附加）**：提醒**不注入**进行中的工作（实测 `agent.inject` 的注记会变成该 step 的 user 消息，让 agent 停下只答监管、对话断流）。改为：note 先排队，到 `agent/pre-step` 时才决定何时附加——默认（`intercept` 关）在**比所审轮次更晚的轮次**首个 step 把 note 追加进 `messages` 尾部；`intercept` 开时在下一个 step 即附加。附加时**原样保留 decision 的 `startsRequestSeries`**（不 reject、不重排），请求序列与前缀缓存不被打断。它只提醒、不授权、不替 agent 做决定。与上一条同级别重复的提醒会被 emission guard 吞掉（`suppressed`）。
 
 ## 配置
 
@@ -38,7 +38,7 @@ step/end × N → delta → ① jev 检测门 → ② LLM 审查 → ③ 解析 
 | --- | --- | --- |
 | `enabled` | `true` | 总开关；关闭时审查员不调用任何模型 |
 | `stepsBetweenReviews` | `6` | 每多少个 step 审查一次；额外成本约 1/N |
-| `intercept` | `false` | 开启后拦一次即将进入的 step；默认只静默注入 |
+| `intercept` | `false` | 开启后提醒在**下一个 step** 即附加；默认（关）只在**更晚轮次**的首个 step 附加，不打断当前轮 |
 | `jevGate` | `true` | 审查前先过 jev 检测门 |
 | `gateSkipClear` | `false` | 省钱模式：门判全清跳过模型调用（准确性优先，默认关闭以度量误放） |
 | `fallbackProvider` / `fallbackModel` | `''` | 回退审查路由；都填才启用 |
@@ -59,7 +59,7 @@ step/end × N → delta → ① jev 检测门 → ② LLM 审查 → ③ 解析 
 
 宿主 webServer 前缀路由，免鉴权：
 
-- `GET /dsh-supervisor/api/state` —— `totals`（`sessions / steps / reviews / notes / unhealthy / outcomes / parseFails / gate`）+ 全部提醒 + 各会话计数（`reviewer / steps / reviews / outcomes / gate / armed / route / fallback`）。`outcomes` 总和 == `reviews`；`unparseable` 由 `parseFails` 按最终出口拆分；`gate` 四键见上。后四档 outcome（`unparseable / error / quota / halted`）计入 `unhealthy`。
+- `GET /dsh-supervisor/api/state` —— `totals`（`sessions / steps / reviews / notes / unhealthy / outcomes / parseFails / parseFailsByRoute / errorKinds / falseClearsByCat / gate / gateByRoute`）+ 全部提醒 + 各会话计数（`reviewer / steps / reviews / outcomes / gate / pending / route / fallback`）。`outcomes` 总和 == `reviews`；`unparseable` 由 `parseFails` 按最终出口拆分；`gate` 四键见上。后四档 outcome（`unparseable / error / quota / halted`）计入 `unhealthy`。
 - `GET /dsh-supervisor/api/config` —— 当前配置值 + `writable` 探测。
 - `POST /dsh-supervisor/api/config` —— `{key, value}` 写一个键（白名单 + 类型收敛 → configEditor 落盘）。
 - `GET /dsh-supervisor/api/ack[?id=]` —— 标记已读。
@@ -68,7 +68,7 @@ step/end × N → delta → ① jev 检测门 → ② LLM 审查 → ③ 解析 
 ## 状态点与面板
 
 - 圆点可拖到**任意位置**（仅受视口边缘约束），位置存 localStorage；badge 显示未读数（`99+` 封顶）；blocker 有呼吸光晕；
-- 点开面板：快捷开关（启用 / 先拦一次，写 `/config` 即时生效）、提醒列表（已读淡显）、底部 live 账本（totals + 门账四键 + outcomes 明细）；
+- 点开面板：快捷开关（启用 / 下一步附加，写 `/config` 即时生效）、提醒列表（已读淡显）、底部 live 账本（totals + 门账四键 + outcomes 明细）；
 - badge 与弹层带 `-webkit-app-region:no-drag`，可安全覆盖顶栏拖拽区。
 
 ## 计数落盘

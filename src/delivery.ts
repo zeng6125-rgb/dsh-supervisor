@@ -1,34 +1,26 @@
-// Advice delivery + the opt-in "intercept once" gate.
+// Advice delivery.
 //
-// Default path is silent: a surviving note is injected into the running
-// session (`agent.inject`), where it rides the next claimed batch without
-// waking the agent or opening a turn of its own. With `intercept` enabled the
-// semantics change to: on the first problem hold the next step
-// (`agent/pre-step` → reject), put the claimed messages back exactly as they
-// were, and hand the agent our notice; the step after that passes normally
-// with the same problems attached. Advisory only — we never decide for the
-// agent.
+// A surviving note waits, then rides a step the agent is ALREADY entering: it
+// is appended to `agent/pre-step`'s messages, spreading the decision so
+// `startsRequestSeries` and the provider's prefix cache survive. It is never
+// pushed into the agent's inbox (`inject`/`steer`): an inbox notice arrives as
+// a user turn of its own, which stopped the agent mid-work and made it answer
+// only the supervision — the discontinuity the user reported. And it never
+// rejects a step: the old reject/re-queue discarded `startsRequestSeries` and
+// restarted the request, which is what broke the cache.
+//
+// Cadence: by default a note attaches on the first step of a LATER turn (the
+// user's next message), so work already in flight is never interrupted. Setting
+// `intercept` attaches on the very next step instead. Advisory only — we never
+// decide for the agent.
 
 import { SUPERVISOR_SOURCE_KIND, type SupervisorNote } from './kinds.js'
 
-export interface DeliveryAgent {
-  readonly id: string
-  readonly status: 'idle' | 'running'
-  readonly inbox: {
-    readonly hasPending: boolean
-    prepend(target: 'next-turn' | 'next-step', message: any): void
-  }
-  steer(message: any): void
-  inject(message: any): void
-  whenIdle(): Promise<void>
-}
-
 export interface DeliveryOptions {
   intercept: boolean
-  lookupAgent?: (sessionId: string) => DeliveryAgent | undefined
   createUserMessage: (input: any) => any
   boundContextSummary: (summary: string) => string
-  logger?: { debug: (...args: unknown[]) => void; warn: (...args: unknown[]) => void }
+  logger?: { debug?(...args: unknown[]): void; warn?(...args: unknown[]): void }
 }
 
 /** Text the agent sees; the prefix is its only cue that this is advice. */
@@ -37,9 +29,12 @@ export function renderNoteText(note: SupervisorNote): string {
 }
 
 export class SupervisorDelivery {
-  private readonly agents = new Map<string, DeliveryAgent>()
-  /** Sessions whose next proposed step is held once, with the note to carry. */
-  private readonly gates = new Map<string, SupervisorNote>()
+  /** Notes waiting to ride a step, per session. */
+  private readonly pending = new Map<string, SupervisorNote[]>()
+  /** Turn the pending notes belong to, so the default path waits for a later one. */
+  private readonly raisedTurn = new Map<string, number>()
+  /** Latest turn observed entering a step, per session. */
+  private readonly lastTurn = new Map<string, number>()
   private intercept: boolean
 
   constructor(private readonly options: DeliveryOptions) {
@@ -48,45 +43,16 @@ export class SupervisorDelivery {
 
   setIntercept(value: boolean): void {
     this.intercept = value
-    if (!value) this.gates.clear()
   }
 
-  registerAgent(agent: DeliveryAgent): void {
-    this.agents.set(agent.id, agent)
+  /** Forget queued notes (compaction rewrote history, or the session ended). */
+  clear(sessionId: string): void {
+    this.pending.delete(sessionId)
+    this.raisedTurn.delete(sessionId)
   }
 
-  unregisterAgent(sessionId: string): void {
-    this.agents.delete(sessionId)
-    this.armed.delete(sessionId)
-    this.gates.delete(sessionId)
-  }
-
-  /** Forget a held gate (compaction rewrote history, or the session ended). */
-  disarm(sessionId: string): void {
-    this.gates.delete(sessionId)
-  }
-
-  /**
-   * The turn completed while a gate was armed: the note must not fold the
-   * final output into an extra turn, and (measured) an inject would wake the
-   * agent into exactly such a turn. Park it on the panel instead — visible,
-   * ackable, gone from the conversation. Returns the note and its channel, or
-   * undefined when nothing was armed (the caller re-channels the alert).
-   */
-  releaseAtTurnEnd(sessionId: string): { note: SupervisorNote; channel: 'panel' } | undefined {
-    const note = this.gates.get(sessionId)
-    if (!note) return undefined
-    this.gates.delete(sessionId)
-    this.options.logger?.debug?.('gate parked at turn end', { sessionId, severity: note.severity })
-    return { note, channel: 'panel' }
-  }
-
-  isArmed(sessionId: string): boolean {
-    return this.gates.has(sessionId)
-  }
-
-  private get armed(): Map<string, SupervisorNote> {
-    return this.gates
+  hasPending(sessionId: string): boolean {
+    return (this.pending.get(sessionId)?.length ?? 0) > 0
   }
 
   private buildMessage(note: SupervisorNote): any {
@@ -101,87 +67,45 @@ export class SupervisorDelivery {
     })
   }
 
-  /**
-   * The turn this note reviews has already completed. Measured on the live
-   * session: an inject here wakes the agent into a brand-new turn whose only
-   * content is "here is advice about the turn you just finished" — the user
-   * reported exactly that extra message. So the note goes to the panel only
-   * (still visible, still acked) and the conversation ends where it ended.
-   * Returns `panel` as the channel; nothing is injected or armed.
-   */
-  deliverClosedTurn(sessionId: string, note: SupervisorNote): 'panel' {
-    this.options.logger?.debug?.('note parked for a closed turn', { sessionId, severity: note.severity })
-    return 'panel'
+  /** A note survived the emission guard: it waits for a step to ride. */
+  raise(sessionId: string, note: SupervisorNote): 'pending' {
+    const queue = this.pending.get(sessionId) ?? []
+    queue.push(note)
+    this.pending.set(sessionId, queue)
+    if (!this.raisedTurn.has(sessionId)) {
+      // Anchor to the turn these notes were reviewed in; the default path then
+      // waits for a strictly later turn, so it never interrupts current work.
+      this.raisedTurn.set(sessionId, this.lastTurn.get(sessionId) ?? 0)
+    }
+    this.options.logger?.debug?.('note queued for a later step', { sessionId, severity: note.severity })
+    return 'pending'
   }
 
   /**
-   * A note survived the emission guard. With interception on, hold the next
-   * step for it; otherwise route the notice straight into the running work.
+   * `agent/pre-step` hook body. Records the turn entering a step and, when a
+   * note is due, returns a new decision with the note appended to `messages`.
+   *
+   * Spreading the decision preserves `startsRequestSeries`, so the request
+   * series and the provider's prefix cache survive; only the tail grows.
+   *
+   * With `intercept` off (default) a note attaches on the first step of a turn
+   * LATER than the one it reviewed — the user's next message — so in-flight
+   * work is never cut off. With `intercept` on it attaches on the next step.
+   * `onAttached` lets the caller re-channel the parked alerts to `delivered`.
    */
-  raise(sessionId: string, note: SupervisorNote): 'armed' | 'delivered' | 'dropped' {
-    if (this.intercept && !this.gates.has(sessionId)) {
-      this.gates.set(sessionId, note)
-      this.options.logger?.debug?.('step gate armed', { sessionId, severity: note.severity })
-      return 'armed'
+  attachToStep(sessionId: string, decision: any, turn: number, onAttached?: (notes: SupervisorNote[]) => void): any {
+    this.lastTurn.set(sessionId, turn)
+    if (!decision || decision.kind !== 'enter') return decision
+    const queue = this.pending.get(sessionId)
+    if (!queue || queue.length === 0) return decision
+    if (!this.intercept) {
+      const anchor = this.raisedTurn.get(sessionId) ?? 0
+      if (turn <= anchor) return decision // wait for a later turn
     }
-    return this.deliver(sessionId, note) ? 'delivered' : 'dropped'
-  }
-
-  private deliver(sessionId: string, note: SupervisorNote): boolean {
-    const agent = this.agents.get(sessionId) ?? this.options.lookupAgent?.(sessionId)
-    if (!agent) {
-      // Advisory only: never throw and never stall the loop over a lost note.
-      this.options.logger?.warn?.('note dropped — no agent for session', { sessionId, severity: note.severity })
-      return false
-    }
-    const message = this.buildMessage(note)
-    // Silent by default: inject only rides the next claimed batch and never
-    // opens a turn of its own. A steer wake made an idle session start a fresh
-    // turn out of nowhere, which read to the user as the conversation
-    // restarting itself; the opt-in intercept path resumes with steer instead.
-    agent.inject(message)
-    return true
-  }
-
-  /**
-   * `agent/pre-step` hook body: hold the proposed step once and re-queue it.
-   */
-  interceptStep(sessionId: string, agent: DeliveryAgent, claimed: readonly unknown[]): boolean {
-    const note = this.gates.get(sessionId)
-    if (!note) return false
-    this.gates.delete(sessionId)
-
-    // A rejected step keeps its claimed batch out of the inbox and closes the
-    // turn without ever surfacing those messages, so put them back verbatim.
-    // prepend() inserts at the head, hence the reverse walk preserves order.
-    for (let i = claimed.length - 1; i >= 0; i--) {
-      try {
-        agent.inbox.prepend('next-step', claimed[i])
-      } catch (error) {
-        this.options.logger?.warn?.('re-queue skipped', { sessionId, error: String(error) })
-      }
-    }
-
-    // Rejecting closes the turn and the driver parks in `idle` with pending
-    // work but no wake requested, so we resume it ourselves once it settles.
-    void this.resume(agent, sessionId, note)
-    return true
-  }
-
-  private async resume(agent: DeliveryAgent, sessionId: string, note: SupervisorNote): Promise<void> {
-    try {
-      if (agent.status === 'running') await agent.whenIdle()
-      if (!agent.inbox.hasPending) {
-        // The re-queue never landed, so there is no batch for the note to ride.
-        // Wake the driver anyway: we already cost this session a step by
-        // holding it, and dropping the note now would make that hold pointless.
-        this.options.logger?.warn?.('resuming with the note alone', { sessionId })
-      }
-      // The notice joins the re-queued batch: the second step passes normally
-      // and carries the problems with it.
-      agent.steer(this.buildMessage(note))
-    } catch (error) {
-      this.options.logger?.warn?.('resume after reject failed', { sessionId, error: String(error) })
-    }
+    this.pending.delete(sessionId)
+    this.raisedTurn.delete(sessionId)
+    onAttached?.(queue)
+    const extra = queue.map((note) => this.buildMessage(note))
+    return { ...decision, messages: [...(decision.messages ?? []), ...extra] }
   }
 }

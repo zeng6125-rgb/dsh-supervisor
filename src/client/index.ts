@@ -23,8 +23,7 @@ interface Alert {
   severity: 'concern' | 'blocker'
   note: string
   at: number
-  channel: 'armed' | 'delivered' | 'dropped' | 'panel'
-  intercepted: boolean
+  channel: 'pending' | 'delivered' | 'dropped' | 'panel'
   acked: boolean
 }
 
@@ -37,7 +36,8 @@ interface SessionState {
   reviews: number
   /** Per-session split of `reviews`; the four unhealthy kinds mean the reviewer is not really working. */
   outcomes?: Record<string, number>
-  armed: boolean
+  /** A queued note is waiting to ride the next step the agent enters. */
+  pending: boolean
 }
 
 interface Snapshot {
@@ -464,7 +464,7 @@ function useTitles(props: any): (sessionId: string) => string {
 var AlertItem = function AlertItem(props: { alert: Alert; now: number; label: string; onAck: (id?: string) => void }) {
   var alert = props.alert
   var label = alert.severity === 'blocker' ? '严重' : '注意'
-  var held = alert.intercepted ? '已拦下一步 · ' : ''
+  var held = alert.channel === 'pending' ? '待附加下一步 · ' : alert.channel === 'panel' ? '' : ''
   return h(
     'div',
     { className: 'dsv-item', 'data-sev': alert.severity, 'data-acked': alert.acked ? '1' : '0' },
@@ -722,10 +722,10 @@ function Panel(props: any) {
                 'aria-checked': !!snapshot.enabled, 'aria-label': '启用审查员',
                 disabled: writing, onClick: function () { toggleConfig('enabled', !snapshot.enabled) },
               }),
-              h('span', { className: 'dsv-quick-label' }, '先拦一次'),
+              h('span', { className: 'dsv-quick-label' }, '下一步附加'),
               h('button', {
                 className: 'dsv-switch', type: 'button', role: 'switch',
-                'aria-checked': !!snapshot.intercept, 'aria-label': '先拦一次',
+                'aria-checked': !!snapshot.intercept, 'aria-label': '下一步附加',
                 disabled: writing, onClick: function () { toggleConfig('intercept', !snapshot.intercept) },
               }),
               error ? h('span', { className: 'dsv-err' }, error) : null,
@@ -805,7 +805,7 @@ interface FieldSpec {
 var FIELDS: FieldSpec[] = [
   { key: 'enabled', label: '启用', hint: '开启后台审查员盯着每个会话。关闭时审查员不会调用任何模型。', toggle: true },
   { key: 'stepsBetweenReviews', label: '审查间隔（步）', hint: '每多少步审查一次。额外 token 成本约为 1/N。', min: 1, max: 60 },
-  { key: 'intercept', label: '先拦一次', hint: '有提醒时先拦住下一步，请主 agent 处理；再下一步照常放行并附上问题。', toggle: true },
+  { key: 'intercept', label: '下一步即附加', hint: '提醒默认等你下次提问时才进入会话；开启后它随下一个 step 附加（不重排、不打断轮次）。', toggle: true },
   { key: 'jevGate', label: 'jev 检测门', hint: '审查前先过一道 jev 快筛：命中的类别作为线索拼进审查提示词。', toggle: true },
   { key: 'gateSkipClear', label: '门清即跳过（省钱模式）', hint: '默认关闭：门判全清也照审，误放可度量。开启后全清的 delta 跳过模型调用。', toggle: true },
   { key: 'fallbackRoute', label: '回退路由', hint: '审查路由连续失败后切到这条路由；留空则不启用回退，连续失败时面板会亮失明提醒。', select: 'route', ph: '不启用' },
@@ -1127,7 +1127,7 @@ function Status(props: { live: Snapshot; titleOf?: (sessionId: string) => string
       var count = s.outcomes ? s.outcomes[key] : 0
       if (count) bad += count
     }
-    var text = (REVIEWER_ZH[s.reviewer] || s.reviewer) + ' · ' + s.steps + ' 步 · ' + s.reviews + ' 次审查' + (s.armed ? ' · 待拦截' : '') + (s.route ? ' · ' + s.route.provider + '/' + s.route.model : '') + (s.fallback ? ' · 回退 ' + s.fallback.provider + '/' + s.fallback.model : '')
+    var text = (REVIEWER_ZH[s.reviewer] || s.reviewer) + ' · ' + s.steps + ' 步 · ' + s.reviews + ' 次审查' + (s.pending ? ' · 待附加' : '') + (s.route ? ' · ' + s.route.provider + '/' + s.route.model : '') + (s.fallback ? ' · 回退 ' + s.fallback.provider + '/' + s.fallback.model : '')
     return h('div', { className: 'dsv-cell', key: s.sessionId, 'data-bad': bad ? '1' : '0', title: s.sessionId }, h('b', null, titleOf(s.sessionId)), ' — ' + text)
   })
 

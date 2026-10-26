@@ -194,11 +194,6 @@ export function apply(ctx0: Context, config?: unknown): void {
   /** Image notes already folded into the transcript, per session (one request
    *  per step repeats the whole history, so notes must be de-duplicated). */
   const imageNotes = new Map<string, Set<string>>()
-  /** Sessions whose last turn ended `completed`: a review note arriving now
-   *  belongs to finished work, so it must not arm a gate for the next turn. */
-  const turnClosed = new Set<string>()
-  /** Bytes of request-side images, drained by the reviewer per call (the
-   *  reviewer looks at what the user actually attached, then they clear). */
   const pendingImages = new Map<string, Array<{ mediaType: string; data: string }>>()
 
   // jev as a cheap detection gate: one typed call per delta, and only a flagged
@@ -215,14 +210,13 @@ export function apply(ctx0: Context, config?: unknown): void {
 
   const delivery = new SupervisorDelivery({
     intercept: cfg.intercept,
-    lookupAgent: (sessionId) => ctx.agents?.get(sessionId as never) as never,
     createUserMessage,
     boundContextSummary,
     logger: log,
   })
 
-  const syncArmed = (sessionId: string): void => {
-    state.setSession(sessionId, { armed: delivery.isArmed(sessionId) })
+  const syncPending = (sessionId: string): void => {
+    state.setSession(sessionId, { pending: delivery.hasPending(sessionId) })
   }
 
   /** Reviewers are created lazily; the route may not be known yet. */
@@ -284,14 +278,11 @@ export function apply(ctx0: Context, config?: unknown): void {
         log.warn('review session blind: route failing with no fallback configured', { sessionId, ...info })
       },
       onNote: (note: SupervisorNote, categories?: readonly string[]) => {
-        // The turn this note reviews has already ended: injecting is still
-        // right (the advice lands in the trajectory), but arming would hold a
-        // step of the NEXT turn — the extra output the user reported.
-        const channel = turnClosed.has(sessionId)
-          ? delivery.deliverClosedTurn(sessionId, note)
-          : delivery.raise(sessionId, note)
+        // The note waits (see SupervisorDelivery) for a step the agent is
+        // already entering: no inbox turn of its own, no held step.
+        const channel = delivery.raise(sessionId, note)
         state.recordAlert(sessionId, note, channel)
-        syncArmed(sessionId)
+        syncPending(sessionId)
         log.debug('note raised', { sessionId, severity: note.severity, channel, categories })
       },
       onStateChange: (next) => {
@@ -316,39 +307,24 @@ export function apply(ctx0: Context, config?: unknown): void {
   const transcript = new SessionTranscript({
     stepsBetweenReviews: cfg.stepsBetweenReviews,
     maxDeltaMessages: cfg.maxDeltaMessages,
-    onStepEnd: (sessionId, turn, step) => {
+    onStepEnd: (sessionId) => {
       state.bump(sessionId, 'steps')
-      // A step after a completed turn means the conversation moved on: the
-      // next note may hold a step again (the user asked for work, not a fold).
-      turnClosed.delete(sessionId)
     },
     onRewrite: (sessionId) => {
-      // Compaction rewrote the surface: buffered transcript and any held gate
-      // both refer to history that no longer exists.
-      delivery.disarm(sessionId)
-      syncArmed(sessionId)
+      // Compaction rewrote the surface: buffered transcript and any queued
+      // notes both refer to history that no longer exists.
+      delivery.clear(sessionId)
+      syncPending(sessionId)
       reviewers.get(sessionId)?.resetGuard()
     },
-    // A completed turn is the conversation's own ending: holding the next step
-    // would fold the final output the user just read into an extra turn that
-    // only exists to carry our note. Two things happen here:
-    //   1. flush the pending delta now — waiting for the step threshold would
-    //      push the review into the NEXT turn, where its note would arm and
-    //      hold a step the user never asked for (the reported symptom);
-    //   2. mark the turn closed so a note that arrives after this point goes
-    //      straight to silent inject instead of arming a gate.
-    onTurnEnd: (sessionId, turn, reason) => {
+    // A completed turn flushes the pending delta now — waiting for the step
+    // threshold would push the review into the NEXT turn (the old source of the
+    // "extra supervision turn"). The note then queues normally: by default it
+    // attaches on the first step of a LATER turn, so the finished summary is
+    // never answered as its own turn, and no inbox message is ever injected.
+    onTurnEnd: (sessionId, _turn, reason) => {
       if (reason !== 'completed') return
-      turnClosed.add(sessionId)
       transcript.flushNow(sessionId)
-      const released = delivery.releaseAtTurnEnd(sessionId)
-      if (released) {
-        // The alert was recorded as `armed` when raised; re-channel it to what
-        // it actually rode instead of appending a second copy.
-        state.updateAlertChannel(sessionId, released.note, released.channel)
-        syncArmed(sessionId)
-        log.debug('gate released at turn end', { sessionId, turn, channel: released.channel })
-      }
     },
     onDelta: (sessionId, delta) => {
       ensureReviewer(sessionId)?.enqueue(delta)
@@ -362,9 +338,8 @@ export function apply(ctx0: Context, config?: unknown): void {
     reviewers.delete(sessionId)
     routes.delete(sessionId)
     imageNotes.delete(sessionId)
-    turnClosed.delete(sessionId)
     pendingImages.delete(sessionId)
-    delivery.unregisterAgent(sessionId)
+    delivery.clear(sessionId)
     state.dropSession(sessionId)
   }
 
@@ -389,10 +364,10 @@ export function apply(ctx0: Context, config?: unknown): void {
         }
         if (before.enabled !== next.enabled) {
           if (!next.enabled) {
-            // Stopping must not leave held notes or paused reviewers behind.
+            // Stopping must not leave queued notes or paused reviewers behind.
             for (const sessionId of [...reviewers.keys()]) {
-              delivery.disarm(sessionId)
-              syncArmed(sessionId)
+              delivery.clear(sessionId)
+              syncPending(sessionId)
             }
             log.debug('disabled by configuration; watching nothing')
           } else {
@@ -434,7 +409,6 @@ export function apply(ctx0: Context, config?: unknown): void {
       try {
         const sessionId = String(agent?.id)
         if (sessionId && sessionId !== 'undefined') {
-          delivery.registerAgent(agent)
           ensureReviewer(sessionId)
           const route = routes.get(sessionId)
           if (route) state.setSession(sessionId, { route })
@@ -537,24 +511,29 @@ export function apply(ctx0: Context, config?: unknown): void {
     { global: true } as never,
   )
 
-  // ── intercept once ──────────────────────────────────────────────────────────
+  // ── attach advice to a step the agent is already entering ──────────────────
   on(
     'agent/pre-step',
-    async ({ agent, messages }: any, next: () => Promise<any>) => {
+    async ({ agent, turn }: any, next: () => Promise<any>) => {
       const decision = await next()
-      if (!cfg.enabled || !cfg.intercept) return decision
+      if (!cfg.enabled) return decision
       if (decision?.kind === 'reject') return decision
       try {
         const sessionId = String(agent?.id)
-        if (!delivery.isArmed(sessionId)) return decision
-        if (delivery.interceptStep(sessionId, agent, messages ?? [])) {
-          syncArmed(sessionId)
-          log.debug('step held once', { sessionId })
-          return { kind: 'reject' }
-        }
+        // Append any queued note to a step the agent is already entering,
+        // spreading the decision so `startsRequestSeries` (and the provider's
+        // prefix cache) survives. The old reject/re-queue/steer path discarded
+        // it and restarted the request, and the inject path turned the note
+        // into its own user turn — both defects the user reported.
+        const withNote = delivery.attachToStep(sessionId, decision, Number(turn ?? 0), (notes) => {
+          for (const note of notes) state.updateAlertChannel(sessionId, note, 'delivered')
+          syncPending(sessionId)
+          log.debug('note attached to a step', { sessionId, turn })
+        })
+        return withNote
       } catch (error) {
-        // Advisory only: a failed intercept must never break the step.
-        log.warn('intercept failed, step passes', { error: String(error) })
+        // Advisory only: a failed attach must never break the step.
+        log.warn('note attach failed, step passes', { error: String(error) })
       }
       return decision
     },
@@ -663,7 +642,7 @@ export function apply(ctx0: Context, config?: unknown): void {
                     severity: /[?&]severity=blocker/.test(query) ? 'blocker' : 'concern',
                     note: noteParam ? decodeURIComponent(noteParam.replace(/\+/g, ' ')) : '演示提醒：检查状态圆点与展开面板，点「已读」关闭。',
                   },
-                  held ? 'armed' : 'delivered',
+                  held ? 'pending' : 'delivered',
                 ),
               }
             } else {
