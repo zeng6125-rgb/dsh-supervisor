@@ -806,6 +806,7 @@ var FIELDS: FieldSpec[] = [
   { key: 'enabled', label: '启用', hint: '开启后台审查员盯着每个会话。关闭时审查员不会调用任何模型。', toggle: true },
   { key: 'stepsBetweenReviews', label: '审查间隔（步）', hint: '每多少步审查一次。额外 token 成本约为 1/N。', min: 1, max: 60 },
   { key: 'intercept', label: '下一步即附加', hint: '提醒默认等你下次提问时才进入会话；开启后它随下一个 step 附加（不重排、不打断轮次）。', toggle: true },
+  { key: 'attachIntervalSec', label: '附加限流（秒）', hint: '同一会话两次附加提醒之间的最小间隔：活跃会话不会每轮都被插话。冷却期间攒下的旧提醒只上面板，到点附加最新一条。0 = 关闭限流。', min: 0, max: 3600 },
   { key: 'jevGate', label: 'jev 检测门', hint: '审查前先过一道 jev 快筛：命中的类别作为线索拼进审查提示词。', toggle: true },
   { key: 'gateSkipClear', label: '门清即跳过（省钱模式）', hint: '默认关闭：门判全清也照审，误放可度量。开启后全清的 delta 跳过模型调用。', toggle: true },
   { key: 'fallbackRoute', label: '回退路由', hint: '审查路由连续失败后切到这条路由；留空则不启用回退，连续失败时面板会亮失明提醒。', select: 'route', ph: '不启用' },
@@ -949,7 +950,7 @@ function ConfigCard(props: CardProps) {
 
   // Four sectioned cards; every config key lives in exactly one.
   var GROUPS: Array<{ title: string; keys: string[] }> = [
-    { title: '运行', keys: ['enabled', 'stepsBetweenReviews', 'intercept'] },
+    { title: '运行', keys: ['enabled', 'stepsBetweenReviews', 'intercept', 'attachIntervalSec'] },
     { title: '审查门', keys: ['jevGate', 'gateSkipClear'] },
     { title: '审查模型', keys: ['reviewRoute'] },
     { title: '故障回退', keys: ['fallbackRoute', 'fallbackAfterErrors'] },

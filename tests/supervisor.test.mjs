@@ -44,10 +44,12 @@ function fakeLlm(script) {
   }
 }
 
-function delivery(intercept = false) {
+function delivery(intercept = false, attachCooldownMs = 0, now = () => Date.now()) {
   const warnings = []
   const d = new SupervisorDelivery({
     intercept,
+    attachCooldownMs: () => attachCooldownMs,
+    now,
     createUserMessage: (input) => ({ role: 'user', ...input }),
     boundContextSummary: (summary) => summary,
     logger: { debug() {}, warn(...args) { warnings.push(args) } },
@@ -87,6 +89,7 @@ test('resolveConfig unwraps volatile references', () => {
     fallbackAfterErrors: volatile(5),
     reviewProvider: volatile('qwen'),
     reviewModel: volatile('qwen3.8-max'),
+    attachIntervalSec: volatile(60),
   })
   assert.deepEqual(cfg, {
     enabled: false,
@@ -102,6 +105,7 @@ test('resolveConfig unwraps volatile references', () => {
     fallbackAfterErrors: 5,
     reviewProvider: 'qwen',
     reviewModel: 'qwen3.8-max',
+    attachIntervalSec: 60,
   })
 })
 
@@ -116,7 +120,7 @@ test('the exported schema declares every field volatile', () => {
   // The settings service skips namespaces with no volatile field, so losing one
   // silently removes the row's configure form from the Plugins page.
   // An object schema keeps its fields under `dict`, each already a Schema.
-  const fields = ['enabled', 'stepsBetweenReviews', 'intercept', 'maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens']
+  const fields = ['enabled', 'stepsBetweenReviews', 'intercept', 'maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens', 'jevGate', 'gateSkipClear', 'fallbackProvider', 'fallbackModel', 'fallbackAfterErrors', 'reviewProvider', 'reviewModel', 'attachIntervalSec']
   for (const field of fields) {
     assert.equal(ConfigSchema.dict[field].meta.volatile, true, `${field} is not volatile`)
   }
@@ -866,6 +870,63 @@ test('raise queues the note without waking, injecting or holding anything', () =
   assert.equal(d.raise(sid, note('you are guessing the API shape')), 'pending')
   assert.equal(d.hasPending(sid), true)
   assert.equal(warnings.length, 0)
+})
+
+test('attach cooldown holds a second note inside the window', () => {
+  // The rate limit that answers "why back-to-back supervision": with a 60s
+  // cooldown, a note that matures one step after the last attach waits.
+  let t = 0
+  const { d } = delivery(false, 60_000, () => t)
+  d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u1' }] }, 1)
+  d.raise(sid, note('first'))
+  t = 1000
+  const first = d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u2' }] }, 2)
+  assert.equal(first.messages.length, 2, 'the first note rides turn 2')
+  d.raise(sid, note('second'))
+  t = 2000 // 1s later, inside the window
+  const held = d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u3' }] }, 3)
+  assert.equal(held.messages.length, 1, 'the second note waits out the cooldown')
+  assert.equal(d.hasPending(sid), true)
+  t = 61_000 // window expired
+  const late = d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u4' }] }, 4)
+  assert.equal(late.messages.length, 2, 'it rides a step once the cooldown matures')
+})
+
+test('a matured cooldown attaches the newest note and parks the older ones', () => {
+  // Supervision is about the freshest read: older queued notes park on the
+  // panel (visible, ackable) instead of all firing at once.
+  let t = 0
+  const attached = []
+  const parked = []
+  const { d } = delivery(false, 60_000, () => t)
+  d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u1' }] }, 1)
+  d.raise(sid, note('stale A'))
+  d.raise(sid, note('stale B'))
+  d.raise(sid, note('fresh C'))
+  t = 61_000
+  const decision = d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u2' }] }, 2, (notes) => attached.push(...notes), (notes) => parked.push(...notes))
+  assert.deepEqual(attached.map((n) => n.note), ['fresh C'], 'only the newest attaches')
+  assert.deepEqual(parked.map((n) => n.note), ['stale A', 'stale B'], 'the rest park, in order')
+  assert.equal(decision.messages.length, 2, 'one note appended')
+  assert.equal(d.hasPending(sid), false, 'the queue drains')
+})
+
+test('cooldown 0 keeps the old attach-everything-in-order behaviour', () => {
+  // The rate limit is opt-out: with 0 every queued note still rides the step.
+  let t = 0
+  const attached = []
+  const { d } = delivery(true, 0, () => t)
+  d.raise(sid, note('A'))
+  d.raise(sid, note('B'))
+  const decision = d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u1' }] }, 1, (notes) => attached.push(...notes))
+  assert.equal(decision.messages.length, 3)
+  assert.deepEqual(attached.map((n) => n.note), ['A', 'B'])
+})
+
+test('the default attach interval is three minutes, and resolveConfig floors it at 0', () => {
+  assert.equal(resolveConfig({}).attachIntervalSec, 180)
+  assert.equal(resolveConfig({ attachIntervalSec: -5 }).attachIntervalSec, 0)
+  assert.equal(resolveConfig({ attachIntervalSec: '60' }).attachIntervalSec, 60)
 })
 
 test('a note waits for a later turn: same-turn steps pass untouched, the next turn carries it', () => {

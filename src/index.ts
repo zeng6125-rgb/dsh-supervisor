@@ -102,6 +102,7 @@ const CONFIG_VALUE_KINDS: Record<string, 'boolean' | 'number' | 'string' | 'rout
   reviewRoute: 'route',
   fallbackRoute: 'route',
   fallbackAfterErrors: 'number',
+  attachIntervalSec: 'number',
 }
 
 /** Route keys a combined picker writes, and the config fields they map to. */
@@ -210,6 +211,8 @@ export function apply(ctx0: Context, config?: unknown): void {
 
   const delivery = new SupervisorDelivery({
     intercept: cfg.intercept,
+    // Live-read: a settings-page change hot-swaps the window without remount.
+    attachCooldownMs: () => cfg.attachIntervalSec * 1000,
     createUserMessage,
     boundContextSummary,
     logger: log,
@@ -525,11 +528,23 @@ export function apply(ctx0: Context, config?: unknown): void {
         // prefix cache) survives. The old reject/re-queue/steer path discarded
         // it and restarted the request, and the inject path turned the note
         // into its own user turn — both defects the user reported.
-        const withNote = delivery.attachToStep(sessionId, decision, Number(turn ?? 0), (notes) => {
-          for (const note of notes) state.updateAlertChannel(sessionId, note, 'delivered')
-          syncPending(sessionId)
-          log.debug('note attached to a step', { sessionId, turn })
-        })
+        const withNote = delivery.attachToStep(
+          sessionId,
+          decision,
+          Number(turn ?? 0),
+          (notes) => {
+            for (const note of notes) state.updateAlertChannel(sessionId, note, 'delivered')
+            syncPending(sessionId)
+            log.debug('note attached to a step', { sessionId, turn })
+          },
+          (notes) => {
+            // Superseded while the cooldown held: park them on the panel —
+            // visible and ackable, but never interrupting the conversation.
+            for (const note of notes) state.updateAlertChannel(sessionId, note, 'panel')
+            syncPending(sessionId)
+            log.debug('older queued notes parked on the panel', { sessionId, turn, count: notes.length })
+          },
+        )
         return withNote
       } catch (error) {
         // Advisory only: a failed attach must never break the step.
@@ -609,6 +624,7 @@ export function apply(ctx0: Context, config?: unknown): void {
                   reviewRoute: cfg.reviewProvider + '\u0000' + cfg.reviewModel,
                   fallbackRoute: cfg.fallbackProvider + '\u0000' + cfg.fallbackModel,
                   fallbackAfterErrors: cfg.fallbackAfterErrors,
+                  attachIntervalSec: cfg.attachIntervalSec,
                 },
               }
             } else if (sub === '/models') {

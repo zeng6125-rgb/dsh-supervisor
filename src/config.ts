@@ -30,6 +30,14 @@ export interface Config {
    */
   reviewProvider: string
   reviewModel: string
+  /**
+   * Attach cooldown in seconds: at most one supervision note rides a step per
+   * window per session, so an active conversation is not spoken to every turn
+   * (measured: a busy session got attaches 22s-2min apart). 0 disables the
+   * rate limit. Older notes queued during a cooldown park on the panel when
+   * the newest one finally attaches.
+   */
+  attachIntervalSec: number
 }
 
 /**
@@ -52,13 +60,14 @@ export const Config = z.object({
   fallbackAfterErrors: z.number().min(1).max(20).default(3).volatile(),
   reviewProvider: z.string().default('').volatile(),
   reviewModel: z.string().default('').volatile(),
+  attachIntervalSec: z.number().min(0).max(3600).default(180).volatile(),
 })
 
 const DEFAULTS: Required<Config> = {
   enabled: true,
   stepsBetweenReviews: 6,
-  // Off by default: rejecting a step ends the running turn, which reads to the
-  // user like the conversation being cut and restarted. Silent inject instead.
+  // Off by default: attaching on the very next step interrupts work already in
+  // flight. The default path waits for the user's next turn instead.
   intercept: false,
   maxDeltaMessages: 60,
   maxNoteChars: 600,
@@ -78,6 +87,9 @@ const DEFAULTS: Required<Config> = {
   // Follow the session's own model by default; the override is opt-in.
   reviewProvider: '',
   reviewModel: '',
+  // At most one spoken note per session per 3 minutes: measured attaches 22s
+  // to 2min apart on a busy session read as back-to-back supervision.
+  attachIntervalSec: 180,
 }
 
 /**
@@ -132,5 +144,6 @@ export function resolveConfig(raw: unknown): Required<Config> {
     fallbackAfterErrors: num(source.fallbackAfterErrors, DEFAULTS.fallbackAfterErrors, 1),
     reviewProvider: str(source.reviewProvider, DEFAULTS.reviewProvider),
     reviewModel: str(source.reviewModel, DEFAULTS.reviewModel),
+    attachIntervalSec: num(source.attachIntervalSec, DEFAULTS.attachIntervalSec, 0),
   }
 }
