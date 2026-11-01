@@ -44,15 +44,6 @@ export interface SupervisorSessionState {
   /** How each failed review died, by fingerprint (`timeout`, `rate-limit`, …).
    *  `error` alone could not tell a dead route from a throttled one. */
   readonly errorKinds?: Readonly<Record<string, number>>
-  /** Gate-vs-LLM agreement: how often jev screened clear, and how often the
-   *  LLM then disagreed with a note (a measured gate miss). `flagged` counts
-   *  deltas the gate hit on, `confirmed` the subset where the review then
-   *  raised a note — the hit side of the ledger, co-occurrence not attribution. */
-  readonly gate?: { readonly cleared: number; readonly falseClears: number; readonly flagged: number; readonly confirmed: number }
-  /** Which categories the false clears were about (note self-report; `unknown`
-   *  when the route did not report any). Answers "which problem class does the
-   *  gate systematically miss" without a contract break on older routes. */
-  readonly falseClearsByCat?: Readonly<Record<string, number>>
   /** A queued note is waiting to ride the next step the agent enters. */
   readonly pending: boolean
 }
@@ -71,8 +62,6 @@ interface PersistedSession {
   route?: { provider: string; model: string }
   parseFails?: Record<string, number>
   errorKinds?: Record<string, number>
-  falseClearsByCat?: Record<string, number>
-  gate?: { cleared: number; falseClears: number; flagged?: number; confirmed?: number }
 }
 
 export class SupervisorState {
@@ -85,7 +74,7 @@ export class SupervisorState {
 
   /**
    * `persistPath` makes the counters survive a host restart (they are the only
-   * evidence of how the gate has been calibrating). Alerts stay in memory:
+   * evidence of how the reviewer has been behaving). Alerts stay in memory:
    * they are ephemeral UI, and a stale banner after a restart would mislead.
    */
   constructor(
@@ -106,17 +95,6 @@ export class SupervisorState {
           ...(saved.route ? { route: { ...saved.route } } : {}),
           ...(saved.parseFails ? { parseFails: { ...saved.parseFails } } : {}),
           ...(saved.errorKinds ? { errorKinds: { ...saved.errorKinds } } : {}),
-          ...(saved.falseClearsByCat ? { falseClearsByCat: { ...saved.falseClearsByCat } } : {}),
-          ...(saved.gate
-            ? {
-                gate: {
-                  cleared: saved.gate.cleared ?? 0,
-                  falseClears: saved.gate.falseClears ?? 0,
-                  flagged: saved.gate.flagged ?? 0,
-                  confirmed: saved.gate.confirmed ?? 0,
-                },
-              }
-            : {}),
           pending: false,
         })
       }
@@ -207,33 +185,6 @@ export class SupervisorState {
     this.scheduleFlush()
   }
 
-  /** One gate-vs-LLM agreement sample, for threshold calibration. */
-  recordGate(sessionId: string, stat: 'cleared' | 'false_clear' | 'flagged' | 'flag_confirmed', categories?: readonly string[]): void {
-    const current = this.base(sessionId)
-    const gate = current.gate ?? { cleared: 0, falseClears: 0, flagged: 0, confirmed: 0 }
-    // A false clear's categories show which problem class the gate missed.
-    // An unreported (or hallucinated-to-empty) list lands in `unknown` so the
-    // sample still counts.
-    let falseClearsByCat = current.falseClearsByCat
-    if (stat === 'false_clear') {
-      const keys = categories && categories.length > 0 ? categories : ['unknown']
-      const next = { ...(falseClearsByCat ?? {}) }
-      for (const key of keys) next[key] = (next[key] ?? 0) + 1
-      falseClearsByCat = next
-    }
-    this.sessions.set(sessionId, {
-      ...current,
-      ...(falseClearsByCat ? { falseClearsByCat } : {}),
-      gate: {
-        cleared: gate.cleared + (stat === 'cleared' ? 1 : 0),
-        falseClears: gate.falseClears + (stat === 'false_clear' ? 1 : 0),
-        flagged: gate.flagged + (stat === 'flagged' ? 1 : 0),
-        confirmed: gate.confirmed + (stat === 'flag_confirmed' ? 1 : 0),
-      },
-    })
-    this.scheduleFlush()
-  }
-
   private base(sessionId: string): SupervisorSessionState {
     return (
       this.sessions.get(sessionId) ??
@@ -288,39 +239,17 @@ export class SupervisorState {
     parseFailsByRoute: Record<string, Record<string, number>>
     /** Failed reviews by fingerprint (`timeout`, `rate-limit`, …). */
     errorKinds: Record<string, number>
-    /** Categories the gate's false clears were about (`unknown` when the
-     *  reviewing route did not self-report). */
-    falseClearsByCat: Record<string, number>
-    /** Gate agreement keyed by route, each bucket carrying its `reviews`
-     *  denominator: a 1/1 miss is not a 100% miss rate. A rising miss rate
-     *  concentrated on one route is a prompt problem; spread evenly it is a
-     *  threshold problem. */
-    gateByRoute: Record<string, { cleared: number; falseClears: number; flagged: number; confirmed: number; reviews: number }>
-    gate: { cleared: number; falseClears: number; flagged: number; confirmed: number }
   } {
     const outcomes: Record<string, number> = {}
     const parseFails: Record<string, number> = {}
     const parseFailsByRoute: Record<string, Record<string, number>> = {}
     const errorKinds: Record<string, number> = {}
-    const falseClearsByCat: Record<string, number> = {}
-    const gateByRoute: Record<string, { cleared: number; falseClears: number; flagged: number; confirmed: number; reviews: number }> = {}
-    const gate = { cleared: 0, falseClears: 0, flagged: 0, confirmed: 0 }
     let steps = 0
     let reviews = 0
     for (const session of this.all()) {
       steps += session.steps
       reviews += session.reviews
       const route = session.route ? `${session.route.provider}/${session.route.model}` : 'unknown'
-      const routeGate = (gateByRoute[route] ??= { cleared: 0, falseClears: 0, flagged: 0, confirmed: 0, reviews: 0 })
-      gate.cleared += session.gate?.cleared ?? 0
-      gate.falseClears += session.gate?.falseClears ?? 0
-      gate.flagged += session.gate?.flagged ?? 0
-      gate.confirmed += session.gate?.confirmed ?? 0
-      routeGate.cleared += session.gate?.cleared ?? 0
-      routeGate.falseClears += session.gate?.falseClears ?? 0
-      routeGate.flagged += session.gate?.flagged ?? 0
-      routeGate.confirmed += session.gate?.confirmed ?? 0
-      routeGate.reviews += session.reviews
       for (const [outcome, count] of Object.entries(session.outcomes)) {
         outcomes[outcome] = (outcomes[outcome] ?? 0) + count
       }
@@ -331,9 +260,6 @@ export class SupervisorState {
       }
       for (const [kind, count] of Object.entries(session.errorKinds ?? {})) {
         errorKinds[kind] = (errorKinds[kind] ?? 0) + count
-      }
-      for (const [cat, count] of Object.entries(session.falseClearsByCat ?? {})) {
-        falseClearsByCat[cat] = (falseClearsByCat[cat] ?? 0) + count
       }
     }
     const unhealthy = UNHEALTHY_OUTCOMES.reduce((sum, outcome) => sum + (outcomes[outcome] ?? 0), 0)
@@ -347,9 +273,6 @@ export class SupervisorState {
       parseFails,
       parseFailsByRoute,
       errorKinds,
-      falseClearsByCat,
-      gateByRoute,
-      gate,
     }
   }
 
@@ -380,9 +303,7 @@ export class SupervisorState {
         ...(session.route ? { route: { ...session.route } } : {}),
         ...(session.parseFails ? { parseFails: { ...session.parseFails } } : {}),
         ...(session.errorKinds ? { errorKinds: { ...session.errorKinds } } : {}),
-        ...(session.falseClearsByCat ? { falseClearsByCat: { ...session.falseClearsByCat } } : {}),
-        ...(session.gate ? { gate: { ...session.gate } } : {}),
-      }
+              }
     }
     try {
       mkdirSync(dirname(this.persistPath), { recursive: true })

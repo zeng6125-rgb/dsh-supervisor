@@ -1,20 +1,14 @@
 // dsh-supervisor — a bystander reviewer attached to the main agent.
 //
 // Every ~6 committed steps it reads the recent transcript delta in the
-// background — screened first by the jev gate, whose hits ride into the review
-// prompt as leads — and speaks up only about the seven problem classes in
+// background and speaks up only about the problem classes in
 // `PROBLEM_CATEGORIES` (selective reading, withheld findings, ungrounded
 // claims, untried impossibility, scope creep, blind tuning, done-then-changed).
-// Accuracy comes before cost: a clear gate verdict skips the model call only
-// in the opt-in `gateSkipClear` mode; by default every delta is reviewed and
-// each clear verdict doubles as a measured false-clear sample.
-// A note is injected as advice for the agent (`agent.inject`, silent by
-// default: it rides the next claimed batch and never opens a turn of its own)
-// and surfaced to the user as a badge on the status dot. With the opt-in
-// `intercept` flag the first note instead holds one step so the agent deals
-// with it first, and the step after that passes normally with the note
-// attached. Advisory only — it never authorises anything and never decides for
-// the agent.
+// A note never interrupts the work it reviews: it queues and rides a step the
+// agent is already entering (a later turn by default, the next step with the
+// opt-in `intercept`), rate-limited by a per-session cooldown, and is surfaced
+// to the user on the status dot. Advisory only — it never authorises anything
+// and never decides for the agent.
 
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -24,7 +18,6 @@ import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 
 import { Config, resolveConfig } from './config.js'
 import { SupervisorDelivery } from './delivery.js'
-import { JevGate, type GateTools } from './jev-gate.js'
 import { REVIEWER_CLAIM_KEY, SUPERVISOR_PLUGIN_ID, type SupervisorNote } from './kinds.js'
 import { SUPERVISOR_SYSTEM_PROMPT } from './prompts.js'
 import { Reviewer, type ReviewerRoute } from './review.js'
@@ -33,7 +26,7 @@ import { SessionTranscript } from './transcript.js'
 
 export { Config }
 export const name = SUPERVISOR_PLUGIN_ID
-export const inject = ['agents', 'llm', 'webServer', 'tools', 'configEditor', 'attachments']
+export const inject = ['agents', 'llm', 'webServer', 'configEditor', 'attachments']
 
 const API = '/dsh-supervisor/api'
 
@@ -42,7 +35,6 @@ type Logger = { debug: (...args: unknown[]) => void; warn: (...args: unknown[]) 
 type HostContext = Context & {
   agents?: { get(id: never): unknown; list(): unknown[] }
   llm?: unknown
-  tools?: GateTools
   webServer?: {
     register(entry: { kind: string; path: string; handler: (req: any, res: any) => any }): () => void
   }
@@ -73,8 +65,6 @@ function signature(cfg: Config): string {
     cfg.maxDeltaMessages,
     cfg.maxNoteChars,
     cfg.reviewMaxTokens,
-    cfg.jevGate,
-    cfg.gateSkipClear,
     cfg.fallbackProvider,
     cfg.fallbackModel,
     cfg.fallbackAfterErrors,
@@ -96,8 +86,6 @@ const CONFIG_VALUE_KINDS: Record<string, 'boolean' | 'number' | 'string' | 'rout
   maxDeltaMessages: 'number',
   maxNoteChars: 'number',
   reviewMaxTokens: 'number',
-  jevGate: 'boolean',
-  gateSkipClear: 'boolean',
   // Combined route pickers: one dropdown writes provider+model atomically.
   reviewRoute: 'route',
   fallbackRoute: 'route',
@@ -176,7 +164,7 @@ export function apply(ctx0: Context, config?: unknown): void {
   if (!cfg.enabled) log.debug('disabled by configuration; watching nothing')
 
   const llm = appRootLlm(ctx)
-  // Counters survive host restarts (they are the gate-calibration evidence);
+  // Counters survive host restarts (the ledger is the only calibration evidence);
   // alerts deliberately do not. The instance is a process-wide singleton: a
   // hot reload leaves the previous fiber's web-server routes registered, and
   // those stale closures would otherwise serve a *different*, frozen state
@@ -196,18 +184,6 @@ export function apply(ctx0: Context, config?: unknown): void {
    *  per step repeats the whole history, so notes must be de-duplicated). */
   const imageNotes = new Map<string, Set<string>>()
   const pendingImages = new Map<string, Array<{ mediaType: string; data: string }>>()
-
-  // jev as a cheap detection gate: one typed call per delta, and only a flagged
-  // delta pays for the LLM review. Public contract only — the registered tool,
-  // never jev internals. The wrapper re-reads the volatile `jevGate` flag on
-  // every review so the settings page can switch it live.
-  const jevGate = new JevGate(ctx.tools, log)
-  const gate = {
-    screen: (markdown: string, signal: AbortSignal) =>
-      cfg.jevGate
-        ? jevGate.screen(markdown, signal)
-        : Promise.resolve({ kind: 'unavailable' as const, reason: 'disabled by configuration' }),
-  }
 
   const delivery = new SupervisorDelivery({
     intercept: cfg.intercept,
@@ -233,12 +209,6 @@ export function apply(ctx0: Context, config?: unknown): void {
       systemPrompt: SUPERVISOR_SYSTEM_PROMPT,
       maxTokens: cfg.reviewMaxTokens,
       maxNoteChars: cfg.maxNoteChars,
-      gate,
-      // Live-read so the settings page can flip the cost mode mid-session.
-      get gateSkipClear() {
-        return cfg.gateSkipClear
-      },
-      onGateStat: (stat, categories) => state.recordGate(sessionId, stat, categories),
       // Blind-spot fix: a dead review route no longer silences the session —
       // after enough consecutive failures the reviewer rides this route.
       getFallback: () =>
@@ -280,13 +250,13 @@ export function apply(ctx0: Context, config?: unknown): void {
         )
         log.warn('review session blind: route failing with no fallback configured', { sessionId, ...info })
       },
-      onNote: (note: SupervisorNote, categories?: readonly string[]) => {
+      onNote: (note: SupervisorNote) => {
         // The note waits (see SupervisorDelivery) for a step the agent is
         // already entering: no inbox turn of its own, no held step.
         const channel = delivery.raise(sessionId, note)
         state.recordAlert(sessionId, note, channel)
         syncPending(sessionId)
-        log.debug('note raised', { sessionId, severity: note.severity, channel, categories })
+        log.debug('note raised', { sessionId, severity: note.severity, channel })
       },
       onStateChange: (next) => {
         state.setSession(sessionId, { reviewer: next })
@@ -596,8 +566,6 @@ export function apply(ctx0: Context, config?: unknown): void {
                 enabled: cfg.enabled,
                 intercept: cfg.intercept,
                 stepsBetweenReviews: cfg.stepsBetweenReviews,
-                jevGate: { enabled: cfg.jevGate, available: jevGate.available },
-                gateSkipClear: cfg.gateSkipClear,
                 totals: state.totals(),
                 ...state.snapshot(),
               }
@@ -617,8 +585,6 @@ export function apply(ctx0: Context, config?: unknown): void {
                   maxDeltaMessages: cfg.maxDeltaMessages,
                   maxNoteChars: cfg.maxNoteChars,
                   reviewMaxTokens: cfg.reviewMaxTokens,
-                  jevGate: cfg.jevGate,
-                  gateSkipClear: cfg.gateSkipClear,
                   // Combined route pickers (`provider\u0000model`), the shape
                   // the settings page's single dropdowns read and write.
                   reviewRoute: cfg.reviewProvider + '\u0000' + cfg.reviewModel,

@@ -45,7 +45,7 @@ interface Snapshot {
   enabled?: boolean
   intercept?: boolean
   stepsBetweenReviews?: number
-  totals?: { sessions: number; steps: number; reviews: number; notes: number; unhealthy: number; outcomes: Record<string, number>; parseFails?: Record<string, number>; parseFailsByRoute?: Record<string, Record<string, number>>; errorKinds?: Record<string, number>; falseClearsByCat?: Record<string, number>; gateByRoute?: Record<string, { cleared: number; falseClears: number; flagged: number; confirmed: number; reviews: number }>; gate?: { cleared: number; falseClears: number; flagged: number; confirmed: number } }
+  totals?: { sessions: number; steps: number; reviews: number; notes: number; unhealthy: number; outcomes: Record<string, number>; parseFails?: Record<string, number>; parseFailsByRoute?: Record<string, Record<string, number>>; errorKinds?: Record<string, number> }
   alerts?: Alert[]
   sessions?: SessionState[]
   error?: string
@@ -388,7 +388,6 @@ var OUTCOME_ZH: Record<string, string> = {
   silent: '无话可说',
   note: '提出提醒',
   suppressed: '重复抑制',
-  gated_clear: 'Jev 门放行',
   unparseable: '回复不可解析',
   error: '调用失败',
   quota: '额度耗尽',
@@ -407,18 +406,6 @@ var KIND_ZH: Record<string, string> = {
   aborted: '中断',
   'server-5xx': '服务端 5xx',
   other: '其他',
-}
-
-/** Review category ids (PROBLEM_CATEGORIES in prompts.ts), for the gate line. */
-var CAT_ZH: Record<string, string> = {
-  read_selectively: '选择性读',
-  unsaid_finding: '隐瞒发现',
-  ungrounded_claim: '无据断言',
-  untried_impossible: '没试就说不行',
-  scope_creep: '范围蔓延',
-  blind_tuning: '盲调',
-  done_then_changed: '完工又改',
-  unknown: '未报类',
 }
 
 function relative(at: number, now: number): string {
@@ -807,8 +794,6 @@ var FIELDS: FieldSpec[] = [
   { key: 'stepsBetweenReviews', label: '审查间隔（步）', hint: '每多少步审查一次。额外 token 成本约为 1/N。', min: 1, max: 60 },
   { key: 'intercept', label: '下一步即附加', hint: '提醒默认等你下次提问时才进入会话；开启后它随下一个 step 附加（不重排、不打断轮次）。', toggle: true },
   { key: 'attachIntervalSec', label: '附加限流（秒）', hint: '同一会话两次附加提醒之间的最小间隔：活跃会话不会每轮都被插话。冷却期间攒下的旧提醒只上面板，到点附加最新一条。0 = 关闭限流。', min: 0, max: 3600 },
-  { key: 'jevGate', label: 'jev 检测门', hint: '审查前先过一道 jev 快筛：命中的类别作为线索拼进审查提示词。', toggle: true },
-  { key: 'gateSkipClear', label: '门清即跳过（省钱模式）', hint: '默认关闭：门判全清也照审，误放可度量。开启后全清的 delta 跳过模型调用。', toggle: true },
   { key: 'fallbackRoute', label: '回退路由', hint: '审查路由连续失败后切到这条路由；留空则不启用回退，连续失败时面板会亮失明提醒。', select: 'route', ph: '不启用' },
   { key: 'fallbackAfterErrors', label: '回退触发（连败次数）', hint: '连续多少次 transient 失败后切回退路由。', min: 1, max: 20 },
   { key: 'reviewRoute', label: '审查模型', hint: '固定审查模型：选定后所有会话都用它审查；留空 = 跟随各会话自己的模型。强主模型可能是弱审查员（契约遵守差）。', select: 'route', ph: '跟随会话' },
@@ -951,7 +936,6 @@ function ConfigCard(props: CardProps) {
   // Four sectioned cards; every config key lives in exactly one.
   var GROUPS: Array<{ title: string; keys: string[] }> = [
     { title: '运行', keys: ['enabled', 'stepsBetweenReviews', 'intercept', 'attachIntervalSec'] },
-    { title: '审查门', keys: ['jevGate', 'gateSkipClear'] },
     { title: '审查模型', keys: ['reviewRoute'] },
     { title: '故障回退', keys: ['fallbackRoute', 'fallbackAfterErrors'] },
     { title: '增量与预算', keys: ['maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens'] },
@@ -1087,16 +1071,6 @@ function Status(props: { live: Snapshot; titleOf?: (sessionId: string) => string
       var count = totals.outcomes[key]
       if (count) outcomes.push(OUTCOME_ZH[key] + ' ' + count)
     }
-    // Gate calibration line, both sides: the clear side (how often jev said
-    // clean and the LLM disagreed) and the hit side (how often jev flagged and
-    // the review then raised a note). Shown once there is anything to show.
-    var gate = totals.gate
-    if (gate && (gate.cleared > 0 || gate.flagged > 0)) {
-      var parts: string[] = []
-      if (gate.cleared > 0) parts.push('门 clear ' + gate.cleared + (gate.falseClears ? ' · 误放 ' + gate.falseClears : ''))
-      if (gate.flagged > 0) parts.push('命中 ' + gate.flagged + (gate.confirmed ? ' · 证实 ' + gate.confirmed : ''))
-      outcomes.push(parts.join(' · '))
-    }
     // Failure fingerprints, so a throttled route reads differently from a
     // dead one: `error` alone never said which fix was needed.
     var kinds = totals.errorKinds
@@ -1107,17 +1081,6 @@ function Status(props: { live: Snapshot; titleOf?: (sessionId: string) => string
         if (n) kindParts.push(KIND_ZH[kind] || kind + ' ' + n)
       }
       if (kindParts.length) outcomes.push('失败 ' + kindParts.join(' · '))
-    }
-    // Which categories the gate's misses were about: a concentration on one
-    // class is a prompt fix, an even spread is a threshold fix.
-    var cats = totals.falseClearsByCat
-    if (cats) {
-      var catParts: string[] = []
-      for (var cat of Object.keys(cats)) {
-        var cn = cats[cat]
-        if (cn) catParts.push((CAT_ZH[cat] || cat) + ' ' + cn)
-      }
-      if (catParts.length) outcomes.push('误放类别 ' + catParts.join(' · '))
     }
   }
 

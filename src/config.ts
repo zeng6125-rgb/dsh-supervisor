@@ -7,10 +7,6 @@ export interface Config {
   maxDeltaMessages: number
   maxNoteChars: number
   reviewMaxTokens: number
-  /** Use the jev tool as a cheap detection gate before each LLM review. */
-  jevGate: boolean
-  /** Opt-in cost mode: let a clear gate verdict skip the LLM review entirely. */
-  gateSkipClear: boolean
   /**
    * Fallback review route, used after `fallbackAfterErrors` consecutive
    * transient failures on the session's own route (the blind-spot fix: a dead
@@ -53,8 +49,6 @@ export const Config = z.object({
   maxDeltaMessages: z.number().min(0).max(500).default(60).volatile(),
   maxNoteChars: z.number().min(80).max(4000).default(600).volatile(),
   reviewMaxTokens: z.number().min(128).max(8192).default(2048).volatile(),
-  jevGate: z.boolean().default(true).volatile(),
-  gateSkipClear: z.boolean().default(false).volatile(),
   fallbackProvider: z.string().default('').volatile(),
   fallbackModel: z.string().default('').volatile(),
   fallbackAfterErrors: z.number().min(1).max(20).default(3).volatile(),
@@ -76,11 +70,6 @@ const DEFAULTS: Required<Config> = {
   // body (`finish=max-tokens`), so every review was wasted. It is a cap, not a
   // cost — a short reply bills the same either way — so leave room.
   reviewMaxTokens: 2048,
-  jevGate: true,
-  // Accuracy first: off by default, a clear gate verdict still pays for the
-  // LLM review, so a gate miss can never drop a review on the floor — and
-  // every clear delta doubles as a measured false-clear sample for free.
-  gateSkipClear: false,
   fallbackProvider: '',
   fallbackModel: '',
   fallbackAfterErrors: 3,
@@ -137,8 +126,6 @@ export function resolveConfig(raw: unknown): Required<Config> {
     maxDeltaMessages: num(source.maxDeltaMessages, DEFAULTS.maxDeltaMessages, 0),
     maxNoteChars: num(source.maxNoteChars, DEFAULTS.maxNoteChars, 80),
     reviewMaxTokens: num(source.reviewMaxTokens, DEFAULTS.reviewMaxTokens, 128),
-    jevGate: bool(source.jevGate, DEFAULTS.jevGate),
-    gateSkipClear: bool(source.gateSkipClear, DEFAULTS.gateSkipClear),
     fallbackProvider: str(source.fallbackProvider, DEFAULTS.fallbackProvider),
     fallbackModel: str(source.fallbackModel, DEFAULTS.fallbackModel),
     fallbackAfterErrors: num(source.fallbackAfterErrors, DEFAULTS.fallbackAfterErrors, 1),

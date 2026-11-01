@@ -13,8 +13,7 @@ import { Reviewer } from '../lib/review.js'
 import { SupervisorDelivery } from '../lib/delivery.js'
 import { Config as ConfigSchema, resolveConfig } from '../lib/config.js'
 import { SupervisorState } from '../lib/state.js'
-import { SUPERVISOR_SYSTEM_PROMPT, PROBLEM_CATEGORIES, buildGateQuestions } from '../lib/prompts.js'
-import { JevGate, parseGateReply, JEV_TOOL_NAME } from '../lib/jev-gate.js'
+import { SUPERVISOR_SYSTEM_PROMPT, PROBLEM_CATEGORIES } from '../lib/prompts.js'
 
 const sid = 'session-test'
 
@@ -82,8 +81,6 @@ test('resolveConfig unwraps volatile references', () => {
     maxDeltaMessages: volatile(0),
     maxNoteChars: volatile(1200),
     reviewMaxTokens: volatile(256),
-    jevGate: volatile(false),
-    gateSkipClear: volatile(true),
     fallbackProvider: volatile('hy3'),
     fallbackModel: volatile('qwen3.6'),
     fallbackAfterErrors: volatile(5),
@@ -98,8 +95,6 @@ test('resolveConfig unwraps volatile references', () => {
     maxDeltaMessages: 0,
     maxNoteChars: 1200,
     reviewMaxTokens: 256,
-    jevGate: false,
-    gateSkipClear: true,
     fallbackProvider: 'hy3',
     fallbackModel: 'qwen3.6',
     fallbackAfterErrors: 5,
@@ -120,7 +115,7 @@ test('the exported schema declares every field volatile', () => {
   // The settings service skips namespaces with no volatile field, so losing one
   // silently removes the row's configure form from the Plugins page.
   // An object schema keeps its fields under `dict`, each already a Schema.
-  const fields = ['enabled', 'stepsBetweenReviews', 'intercept', 'maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens', 'jevGate', 'gateSkipClear', 'fallbackProvider', 'fallbackModel', 'fallbackAfterErrors', 'reviewProvider', 'reviewModel', 'attachIntervalSec']
+  const fields = ['enabled', 'stepsBetweenReviews', 'intercept', 'maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens', 'fallbackProvider', 'fallbackModel', 'fallbackAfterErrors', 'reviewProvider', 'reviewModel', 'attachIntervalSec']
   for (const field of fields) {
     assert.equal(ConfigSchema.dict[field].meta.volatile, true, `${field} is not volatile`)
   }
@@ -393,46 +388,6 @@ test('reviewer sends captured images with the review and drains them once', asyn
   assert.equal(llm.calls[1].messages[0].content.length, 1, 'drained: the second review is text-only')
 })
 
-test('a note self-reports its categories, and false clears record them', async () => {
-  // The gate ledger answers "which problem class does the gate miss" only if
-  // notes carry their categories; unknown ids are dropped, and a route that
-  // omits the field entirely still counts as `unknown` rather than breaking.
-  const state = new SupervisorState()
-  const notes = []
-  const gateStats = []
-  const llm = fakeLlm([[
-    JSON.stringify({ note: 'done_then_changed: 完工后又改文件', severity: 'concern', categories: ['done_then_changed', 'hallucinated_id'] }),
-  ]])
-  const { r } = reviewer(llm, {
-    gate: { screen: async () => ({ kind: 'clear' }) },
-    onNote: (note, categories) => notes.push({ note, categories }),
-    onGateStat: (stat, categories) => gateStats.push({ stat, categories }),
-    onOutcome: (outcome) => state.recordReview('s1', outcome),
-  })
-  r.enqueue(delta('a'))
-  await new Promise((resolve) => setTimeout(resolve, 30))
-  assert.equal(notes.length, 1)
-  assert.deepEqual(notes[0].categories, ['done_then_changed'], 'hallucinated id filtered out')
-  assert.equal(gateStats[0].stat, 'cleared', 'the clear side is booked first')
-  assert.deepEqual(gateStats[1], { stat: 'false_clear', categories: ['done_then_changed'] })
-  // The reviewer's own stat went to `gateStats`, not the ledger; the ledger
-  // lines below are recorded directly (state wiring is covered elsewhere).
-  state.recordGate('s1', 'false_clear', ['done_then_changed'])
-  state.recordGate('s1', 'false_clear', [])
-  state.recordGate('s1', 'false_clear', undefined)
-  assert.deepEqual(state.totals().falseClearsByCat, { done_then_changed: 1, unknown: 2 }, 'empty/missing lists land in unknown')
-})
-
-test('a note without the categories field still parses (contract back-compat)', async () => {
-  const notes = []
-  const llm = fakeLlm([[JSON.stringify({ note: 'ungrounded claim: 没验证就说', severity: 'blocker' })]])
-  const { r } = reviewer(llm, { onNote: (note, categories) => notes.push({ note, categories }) })
-  r.enqueue(delta('a'))
-  await new Promise((resolve) => setTimeout(resolve, 30))
-  assert.equal(notes.length, 1)
-  assert.deepEqual(notes[0].categories, [], 'older routes simply report none')
-})
-
 test('reviewer tolerates prose and fences around the frame', async () => {
   const llm = fakeLlm([['Sure!\n```json\n{"note":"off task: the user asked for tests","severity":"blocker"}\n```\nDone.']])
   const { r, notes } = reviewer(llm)
@@ -592,21 +547,14 @@ test('outcomes: state.recordReview keeps reviews and outcomes in agreement', asy
   )
 })
 
-test('outcomes: failures are ledgered by fingerprint, and gate agreement by route', async () => {
+test('outcomes: failures are ledgered by fingerprint', async () => {
   // `error` alone could not tell a throttled route from a dead one; the
-  // fingerprint splits them, and gateByRoute answers whether a rising miss
-  // rate belongs to one route (prompt problem) or all of them (threshold).
+  // fingerprint splits them, so the next fix targets the kind that dominates.
   const state = new SupervisorState()
-  state.setSession('s1', { route: { provider: 'qwen', model: 'qwen3-max' } })
   state.recordReview('s1', 'error', undefined, undefined, { fingerprint: 'rate-limit' })
   state.recordReview('s1', 'error', undefined, undefined, { fingerprint: 'rate-limit' })
   state.recordReview('s1', 'error', undefined, undefined, { fingerprint: 'timeout' })
-  state.recordGate('s1', 'cleared')
-  state.recordGate('s1', 'false_clear')
-  const totals = state.totals()
-  assert.deepEqual(totals.errorKinds, { 'rate-limit': 2, timeout: 1 })
-  // The bucket carries its reviews denominator, so 1/1 never reads as 100%.
-  assert.deepEqual(totals.gateByRoute['qwen/qwen3-max'], { cleared: 1, falseClears: 1, flagged: 0, confirmed: 0, reviews: 3 })
+  assert.deepEqual(state.totals().errorKinds, { 'rate-limit': 2, timeout: 1 })
 })
 
 test('outcomes: an unhealthy reviewer is visible in totals', async () => {
@@ -1060,202 +1008,13 @@ test('six steps produce one queued note that rides the next turn', async () => {
   assert.equal(d.hasPending(sid), false)
 })
 
-// ── jev gate ─────────────────────────────────────────────────────────────────
+// ── problem categories ──────────────────────────────────────────────────────
 
-test('the problem list is seven categories and each becomes one gate question', () => {
+test('the problem list stays seven categories', () => {
+  // The reviewer may only speak about these seven; growing the list silently
+  // widens what the supervisor is allowed to complain about.
   assert.equal(PROBLEM_CATEGORIES.length, 7)
-  const questions = buildGateQuestions()
-  assert.equal(questions.length, 7)
-  for (const q of questions) {
-    assert.equal(q.type, 'noul')
-    assert.ok(q.instructions.length > 10)
-    assert.ok(q.criteria.true && q.criteria.false)
-  }
-  assert.deepEqual(questions.map((q) => q.name), PROBLEM_CATEGORIES.map((c) => c.id))
-})
-
-test('parseGateReply reads noul lines and ignores everything else', () => {
-  const probs = parseGateReply(
-    [
-      'read_selectively: noul=0.9841',
-      'unsaid_finding: noul=0.02',
-      '[usage] in=140 out=1 model=SemIf',
-      'some prose line',
-    ].join('\n'),
-  )
-  assert.equal(probs.get('read_selectively'), 0.9841)
-  assert.equal(probs.get('unsaid_finding'), 0.02)
-  assert.equal(probs.size, 2)
-})
-
-test('a gate with no tools is unavailable and never throws', async () => {
-  const gate = new JevGate(undefined)
-  assert.equal(gate.available, false)
-  const verdict = await gate.screen('**agent:** hello', new AbortController().signal)
-  assert.equal(verdict.kind, 'unavailable')
-})
-
-test('the gate flags only categories at or above the threshold', async () => {
-  const warnings = []
-  const gate = new JevGate(
-    {
-      get: (n) => (n === JEV_TOOL_NAME ? {} : undefined),
-      execute: async () => ({
-        value: 'read_selectively: noul=0.9\nscope_creep: noul=0.6\nblind_tuning: noul=0.59\n',
-      }),
-    },
-    { debug() {}, warn(...args) { warnings.push(args.join(' ')) } },
-  )
-  assert.equal(gate.available, true)
-  const verdict = await gate.screen('**agent:** x', new AbortController().signal)
-  assert.equal(verdict.kind, 'hits')
-  assert.deepEqual(verdict.hits.map((h) => h.id), ['read_selectively', 'scope_creep'])
-  assert.equal(warnings.length, 0)
-})
-
-test('a failing or erroring gate degrades to unavailable', async () => {
-  const warnings = []
-  const logger = { debug() {}, warn(...args) { warnings.push(args.join(' ')) } }
-  const errored = new JevGate(
-    { get: () => ({}), execute: async () => ({ isError: true, error: { message: 'boom' } }) },
-    logger,
-  )
-  assert.equal((await errored.screen('x', new AbortController().signal)).kind, 'unavailable')
-  const threw = new JevGate(
-    { get: () => ({}), execute: async () => { throw new Error('transport down') } },
-    logger,
-  )
-  assert.equal((await threw.screen('x', new AbortController().signal)).kind, 'unavailable')
-  assert.match(warnings[0], /jev gate failed/)
-})
-
-test('a clear gate skips the model call only in the opt-in cost mode', async () => {
-  const llm = fakeLlm([])
-  const { r, notes, outcomes } = reviewer(llm, {
-    gate: { screen: async () => ({ kind: 'clear' }) },
-    gateSkipClear: true,
-  })
-  r.enqueue(delta('**agent:** all verified'))
-  await new Promise((resolve) => setTimeout(resolve, 40))
-  assert.equal(llm.calls.length, 0, 'the gate saved the review call')
-  assert.equal(notes.length, 0)
-  assert.deepEqual(outcomes, ['gated_clear'])
-  assert.equal(r.state, 'idle')
-})
-
-test('a clear gate still pays for the review by default (accuracy first)', async () => {
-  const llm = fakeLlm([[JSON.stringify({ note: 'Nothing to add' })]])
-  const stats = []
-  const { r, outcomes } = reviewer(llm, {
-    gate: { screen: async () => ({ kind: 'clear' }) },
-    onGateStat: (s) => stats.push(s),
-  })
-  r.enqueue(delta('**agent:** all verified'))
-  await new Promise((resolve) => setTimeout(resolve, 40))
-  assert.equal(llm.calls.length, 1, 'skipping is opt-in; the default always reviews')
-  assert.deepEqual(outcomes, ['silent'])
-  assert.deepEqual(stats, ['cleared'])
-})
-
-test('a gate miss is measured: clear gate + note from the model = false_clear', async () => {
-  const llm = fakeLlm([[JSON.stringify({ note: '你在猜测文件存在', severity: 'concern' })]])
-  const stats = []
-  const { r, outcomes } = reviewer(llm, {
-    gate: { screen: async () => ({ kind: 'clear' }) },
-    onGateStat: (s) => stats.push(s),
-  })
-  r.enqueue(delta('**agent:** done'))
-  await new Promise((resolve) => setTimeout(resolve, 40))
-  assert.deepEqual(outcomes, ['note'])
-  assert.deepEqual(stats, ['cleared', 'false_clear'], 'the miss is counted, not guessed')
-})
-
-test('gate hits ride into the review prompt as leads', async () => {
-  const llm = fakeLlm([[JSON.stringify({ note: 'Nothing to add' })]])
-  const { r } = reviewer(llm, {
-    gate: { screen: async () => ({ kind: 'hits', hits: [{ id: 'scope_creep', probability: 0.83 }] }) },
-  })
-  r.enqueue(delta('**agent:** also rewrote the layout'))
-  await new Promise((resolve) => setTimeout(resolve, 40))
-  assert.equal(llm.calls.length, 1)
-  const prompt = llm.calls[0].messages[0].content[0].text
-  assert.match(prompt, /### Jev pre-screen/)
-  assert.match(prompt, /scope_creep \(P=0\.83\)/)
-  assert.match(prompt, /lead to verify/, 'a flag is a lead, never a finding')
-})
-
-test('the hit side of the gate is measured: flagged, and confirmed when the review agrees', async () => {
-  const llm = fakeLlm([[JSON.stringify({ note: '你在悄悄扩大范围', severity: 'concern' })]])
-  const stats = []
-  const { r, outcomes } = reviewer(llm, {
-    gate: { screen: async () => ({ kind: 'hits', hits: [{ id: 'scope_creep', probability: 0.83 }] }) },
-    onGateStat: (s) => stats.push(s),
-  })
-  r.enqueue(delta('**agent:** also rewrote the layout'))
-  await new Promise((resolve) => setTimeout(resolve, 40))
-  assert.deepEqual(outcomes, ['note'])
-  assert.deepEqual(stats, ['flagged', 'flag_confirmed'], 'a note on a flagged delta confirms the lead')
-})
-
-test('a flagged gate whose review stays silent is flagged but not confirmed', async () => {
-  const llm = fakeLlm([[JSON.stringify({ note: 'Nothing to add' })]])
-  const stats = []
-  const { r, outcomes } = reviewer(llm, {
-    gate: { screen: async () => ({ kind: 'hits', hits: [{ id: 'blind_tuning', probability: 0.7 }] }) },
-    onGateStat: (s) => stats.push(s),
-  })
-  r.enqueue(delta('**agent:** tuned it again'))
-  await new Promise((resolve) => setTimeout(resolve, 40))
-  assert.deepEqual(outcomes, ['silent'])
-  assert.deepEqual(stats, ['flagged'], 'the review vetoed the lead; co-occurrence, not attribution')
-})
-
-test('a flagged gate still pays for the model call', async () => {
-  const llm = fakeLlm([[JSON.stringify({ note: '你在猜测', severity: 'concern' })]])
-  const { r, notes, outcomes } = reviewer(llm, {
-    gate: { screen: async () => ({ kind: 'hits', hits: [{ id: 'ungrounded_claim', probability: 0.9 }] }) },
-  })
-  r.enqueue(delta('**agent:** the flag is --retry, I am sure'))
-  await new Promise((resolve) => setTimeout(resolve, 40))
-  assert.equal(llm.calls.length, 1)
-  assert.equal(notes.length, 1)
-  assert.deepEqual(outcomes, ['note'])
-})
-
-test('an unavailable gate falls through to the plain review', async () => {
-  const llm = fakeLlm([[JSON.stringify({ note: 'Nothing to add' })]])
-  const { r, outcomes } = reviewer(llm, {
-    gate: { screen: async () => ({ kind: 'unavailable', reason: 'no jev' }) },
-  })
-  r.enqueue(delta('**agent:** hello'))
-  await new Promise((resolve) => setTimeout(resolve, 40))
-  assert.equal(llm.calls.length, 1)
-  assert.deepEqual(outcomes, ['silent'])
-})
-
-test('a throwing gate falls through to the plain review with a warning', async () => {
-  const llm = fakeLlm([[JSON.stringify({ note: 'Nothing to add' })]])
-  const { r, outcomes, warnings } = reviewer(llm, {
-    gate: { screen: async () => { throw new Error('gate exploded') } },
-  })
-  r.enqueue(delta('**agent:** hello'))
-  await new Promise((resolve) => setTimeout(resolve, 40))
-  assert.equal(llm.calls.length, 1, 'a broken gate must never block a review')
-  assert.deepEqual(outcomes, ['silent'])
-  assert.equal(warnings.length, 1)
-  assert.match(warnings[0], /review gate failed/)
-})
-
-test('resolveConfig carries the jevGate switch', () => {
-  assert.equal(resolveConfig(undefined).jevGate, true)
-  assert.equal(resolveConfig({ jevGate: false }).jevGate, false)
-  assert.equal(resolveConfig({ jevGate: 'yes' }).jevGate, true)
-})
-
-test('resolveConfig carries the gateSkipClear switch, off by default', () => {
-  assert.equal(resolveConfig(undefined).gateSkipClear, false, 'accuracy first: skipping is opt-in')
-  assert.equal(resolveConfig({ gateSkipClear: true }).gateSkipClear, true)
-  assert.equal(resolveConfig({ gateSkipClear: 'yes' }).gateSkipClear, false)
+  assert.equal(new Set(PROBLEM_CATEGORIES.map((c) => c.id)).size, 7, 'ids are unique')
 })
 
 test('counters survive a restart through the persisted state file', async () => {
@@ -1267,8 +1026,6 @@ test('counters survive a restart through the persisted state file', async () => 
     const first = new SupervisorState(path)
     first.bump('s1', 'steps', 7)
     first.recordReview('s1', 'note')
-    first.recordGate('s1', 'cleared')
-    first.recordGate('s1', 'false_clear')
     first.setSession('s1', { route: { provider: 'qwen', model: 'qwen3-max' } })
     first.recordReview('s1', 'unparseable', 'prose forever', 'no_frame')
     first.flush()
@@ -1278,7 +1035,6 @@ test('counters survive a restart through the persisted state file', async () => 
     const totals = second.totals()
     assert.equal(totals.steps, 8, 'restored steps plus new ones')
     assert.equal(totals.reviews, 2)
-    assert.deepEqual(totals.gate, { cleared: 1, falseClears: 1, flagged: 0, confirmed: 0 })
     assert.deepEqual(totals.parseFails, { no_frame: 1 })
     assert.deepEqual(
       totals.parseFailsByRoute,
