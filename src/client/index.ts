@@ -794,6 +794,7 @@ var FIELDS: FieldSpec[] = [
   { key: 'stepsBetweenReviews', label: '审查间隔（步）', hint: '每多少步审查一次。额外 token 成本约为 1/N。', min: 1, max: 60 },
   { key: 'intercept', label: '下一步即附加', hint: '提醒默认等你下次提问时才进入会话；开启后它随下一个 step 附加（不重排、不打断轮次）。', toggle: true },
   { key: 'attachIntervalSec', label: '附加限流（秒）', hint: '同一会话两次附加提醒之间的最小间隔：活跃会话不会每轮都被插话。冷却期间攒下的旧提醒只上面板，到点附加最新一条。0 = 关闭限流。', min: 0, max: 3600 },
+  { key: 'wakeGuard', label: '停滞即唤醒', hint: '审查判定「还有活没干完就停」且 agent 已空闲时，把它推回工作；与附加限流共用冷却窗口，不会连环唤醒。它只补一句提醒，不替 agent 做决定。', toggle: true },
   { key: 'fallbackRoute', label: '回退路由', hint: '审查路由连续失败后切到这条路由；留空则不启用回退，连续失败时面板会亮失明提醒。', select: 'route', ph: '不启用' },
   { key: 'fallbackAfterErrors', label: '回退触发（连败次数）', hint: '连续多少次 transient 失败后切回退路由。', min: 1, max: 20 },
   { key: 'reviewRoute', label: '审查模型', hint: '固定审查模型：选定后所有会话都用它审查；留空 = 跟随各会话自己的模型。强主模型可能是弱审查员（契约遵守差）。', select: 'route', ph: '跟随会话' },
@@ -935,7 +936,7 @@ function ConfigCard(props: CardProps) {
 
   // Four sectioned cards; every config key lives in exactly one.
   var GROUPS: Array<{ title: string; keys: string[] }> = [
-    { title: '运行', keys: ['enabled', 'stepsBetweenReviews', 'intercept', 'attachIntervalSec'] },
+    { title: '运行', keys: ['enabled', 'stepsBetweenReviews', 'intercept', 'attachIntervalSec', 'wakeGuard'] },
     { title: '审查模型', keys: ['reviewRoute'] },
     { title: '故障回退', keys: ['fallbackRoute', 'fallbackAfterErrors'] },
     { title: '增量与预算', keys: ['maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens'] },

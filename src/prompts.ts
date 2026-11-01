@@ -36,9 +36,29 @@ export const PROBLEM_CATEGORIES: readonly ProblemCategory[] = [
     id: 'done_then_changed',
     llm: 'declared done, then kept changing — announcing completion and modifying files afterwards without explaining why;',
   },
+  {
+    id: 'stopped_early',
+    llm: 'stopping with work left — ending the turn or claiming completion while something the user explicitly asked for, or an active goal names, is still undone or unverified;',
+  },
 ]
 
 const CATEGORY_BULLETS = PROBLEM_CATEGORIES.map((c) => `- ${c.id} — ${c.llm}`).join('\n')
+
+/**
+ * The goal objective as an authority block for the review prompt. Without it
+ * "is this finished?" is an opinion about prose; with it the target is stated
+ * by the user's own goal, so a completion claim can be checked against it.
+ */
+export function buildObjectiveHint(goal: {
+  readonly objective: string
+  readonly roundsStarted: number
+  readonly maxGoalRounds: number
+}): string {
+  return `### Objective
+This session is running an active goal (round ${goal.roundsStarted}/${goal.maxGoalRounds}):
+"${goal.objective}"
+The goal is still open by its own definition. Judge the delta against it: work that abandons or contradicts the objective is a problem, and so is a completion claim the transcript does not support. If the delta shows the objective genuinely met, say nothing — the goal owner closes it, not you.`
+}
 
 export const SUPERVISOR_SYSTEM_PROMPT = `You are an independent reviewer watching another AI agent work. You advise only: you never approve or veto actions, and you never issue commands as the main agent.
 
@@ -54,10 +74,11 @@ Severity:
 Do NOT report style, formatting, or anything you are unsure about. Silence is the correct answer most of the time.
 
 Reply with exactly one JSON object and nothing else — no prose, no markdown fences:
-{"note": "<one short paragraph addressed to the agent>", "severity": "concern" | "blocker"}
+{"note": "<one short paragraph addressed to the agent>", "severity": "concern" | "blocker", "category": "<one id from the list above>"}
 
-The "note" text and "severity" value rules:
+The "note", "severity" and "category" rules:
 - "severity" MUST stay one of the English literals "concern" or "blocker" (it is parsed by code).
+- "category" MUST be exactly one of the ids listed above. It decides whether the agent is pushed back to work, so pick the one that actually describes the problem.
 - The "note" MUST be written in Simplified Chinese (简体中文), because a human user reads it on a banner. Keep any code identifiers, file paths, or command names verbatim, but the surrounding explanation is Chinese.
 
 If there is nothing worth saying, reply with exactly:
@@ -74,7 +95,7 @@ If there is nothing worth saying, reply with exactly:
  * the model reads is the shape it must emit.
  */
 export const CONTRACT_REMINDER = `Reply now with exactly one JSON object and nothing else. Your first character must be "{" and your last must be "}":
-{"note": "<one short paragraph in 简体中文, or exactly \\"Nothing to add\\" if silent>", "severity": "concern" | "blocker"}
+{"note": "<one short paragraph in 简体中文, or exactly \\"Nothing to add\\" if silent>", "severity": "concern" | "blocker", "category": "<one id from the list>"}
 No prose before or after, no markdown fences.`
 
 /** Replies that carry no actionable content and must never reach the agent. */

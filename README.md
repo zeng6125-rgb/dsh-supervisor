@@ -4,7 +4,7 @@
 
 **中文** | [English](#english)
 
-一个挂在 DSH 主 agent 身上的**旁观审查员**：每隔 N 步，用同一个模型在后台复查最近的转录，只就七类真问题出声——**只提醒，不授权，不替 agent 做决定**，额外成本约 1/N。
+一个挂在 DSH 主 agent 身上的**旁观审查员**：每隔 N 步，用同一个模型在后台复查最近的转录，只就八类真问题出声——**只提醒，不授权，不替 agent 做决定**，额外成本约 1/N。
 
 An **observer-reviewer** attached to your DSH agent: every N steps, a second model pass quietly reviews the recent transcript and speaks up only about seven kinds of real problems — **advisory only, never approves or vetoes**, at roughly 1/N extra cost.
 
@@ -14,7 +14,8 @@ An **observer-reviewer** attached to your DSH agent: every N steps, a second mod
 
 ## 特性 / Highlights
 
-- **七类真问题 / 7 real categories** — 只盯：选择性读、隐瞒发现、无据断言、没试就说做不到、悄悄扩范围、盲调、宣布完工又改。不报风格，不报猜测。
+- **八类真问题 / 8 real categories** — 只盯：选择性读、隐瞒发现、无据断言、没试就说做不到、悄悄扩范围、盲调、宣布完工又改、**还有活没干完就停手**。不报风格，不报猜测。
+- **停滞即唤醒 / wake-on-stop** — 唯一会主动开一轮的情况：审查判定「还有活没干完就停手」且 agent 已经空闲。它只在**同一会话每冷却窗口最多一次**，有 active goal 时还会把 goal 目标拼进审查提示词作为客观标尺；没有 goal 就只对用户原话判断。
 - **不打断当前轮 / queue, attach & rate-limit** — 提醒先排队，只在「比所审轮次更晚的轮次」首个 step 追加进消息尾部（不注入、不唤醒、不 reject、不重排），保留请求前缀缓存；两次附加之间默认冷却 3 分钟，冷却期内攒下的旧提醒只上面板，到点附加最新一条；「下一步即附加」为可选的即时模式。
 - **解析归因账本 / parse-fail ledger** — 每次审查的结局逐档记账，`unparseable` 按最终解析出口拆分（`no_frame / json_error / empty_note / bad_shape`），提示词优化不靠猜。
 - **回退路由 + 失明提醒 / fallback + blindness alert** — 审查路由连续失败自动切到配置的回退路由；没配回退时面板亮 blocker 告诉你该配什么。
@@ -38,7 +39,7 @@ An **observer-reviewer** attached to your DSH agent: every N steps, a second mod
 
 ## 配置 / Configuration
 
-全部设置收口在 **设置 → 审查员**（审查间隔、下一步即附加、附加限流、回退路由、预算上限……），改完即时生效，无需重载。完整文档见 **[README.full.md](README.full.md)**（中文）。
+全部设置收口在 **设置 → 审查员**（审查间隔、下一步即附加、附加限流、停滞即唤醒、回退路由、预算上限……），改完即时生效，无需重载。完整文档见 **[README.full.md](README.full.md)**（中文）。
 
 All settings live in **Settings → 审查员** and apply live without a reload. Full documentation: [README.full.md](README.full.md) (Chinese).
 

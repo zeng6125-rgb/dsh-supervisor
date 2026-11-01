@@ -4,7 +4,7 @@
 // errors get one retry, quota/permanent errors park the session, and the
 // backlog is bounded so a dead model cannot grow memory without limit.
 
-import { CONTRACT_REMINDER, CONTENT_FREE_PHRASES, normalizeNote } from './prompts.js'
+import { buildObjectiveHint, CONTRACT_REMINDER, CONTENT_FREE_PHRASES, normalizeNote, PROBLEM_CATEGORIES } from './prompts.js'
 import { isNote, type SupervisorNote } from './kinds.js'
 import { EmissionGuard } from './guard.js'
 import type { TranscriptDelta } from './transcript.js'
@@ -60,6 +60,12 @@ export interface ReviewerOptions {
    * reviewer reads a screenshot-bearing turn as the user saying nothing.
    */
   readonly getImages?: () => readonly { readonly mediaType: string; readonly data: string }[]
+  /**
+   * The session's open goal, when it has one. Live-read: a goal can be created
+   * or closed between reviews. Absent means the delta is judged against the
+   * user's own prose only.
+   */
+  readonly getObjective?: () => { readonly objective: string; readonly roundsStarted: number; readonly maxGoalRounds: number } | undefined
   /** Fired once per switch to the fallback route, for the ledger and the panel. */
   readonly onFallback?: (route: ReviewerRoute) => void
   /** Fired once per blind episode: the review route failed `afterErrors` times
@@ -68,7 +74,7 @@ export interface ReviewerOptions {
    * visible, not just a counter in the ledger.
    */
   onBlind?: (info: { errors: number; route?: ReviewerRoute }) => void
-  readonly onNote: (note: SupervisorNote) => void
+  readonly onNote: (note: SupervisorNote, category?: string) => void
   readonly onStateChange?: (state: ReviewerState) => void
   /** `reply` is set for `unparseable` so callers can surface what came back;
    *  `reason` says which parse exit produced it; `failure` (for error-family
@@ -86,10 +92,10 @@ export type ParseFailReason = 'no_frame' | 'json_error' | 'empty_note' | 'bad_sh
 type ParseResult =
   | { readonly kind: 'unparseable'; readonly reason: ParseFailReason }
   | { readonly kind: 'silent' }
-  | { readonly kind: 'note'; readonly note: SupervisorNote }
+  | { readonly kind: 'note'; readonly note: SupervisorNote; readonly category?: string }
 
 /** What one model call produced, plus the raw text when it could not be parsed. */
-type CallResult = { readonly outcome: ReviewOutcome; readonly reply?: string; readonly reason?: ParseFailReason }
+type CallResult = { readonly outcome: ReviewOutcome; readonly reply?: string; readonly reason?: ParseFailReason; readonly category?: string }
 
 const DEFAULT_CALL_TIMEOUT_MS = 120_000
 const DEFAULT_MAX_BACKLOG = 16
@@ -100,7 +106,12 @@ const UNPARSEABLE_NUDGE =
 interface Frame {
   note?: unknown
   severity?: unknown
+  /** One problem-category id; picks the note's class and whether it wakes. */
+  category?: unknown
 }
+
+/** Category ids the contract admits; anything else is dropped, not trusted. */
+const KNOWN_CATEGORY_IDS: ReadonlySet<string> = new Set(PROBLEM_CATEGORIES.map((c) => c.id))
 
 /** Locate the first balanced `{…}`, tolerating prose and markdown fences. */
 function extractJsonFrame(text: string): string | undefined {
@@ -401,6 +412,8 @@ export class Reviewer {
       // was the only channel that held on every route we tested, so the review
       // call sends one user message: contract + `### Session update` + delta.
       let promptText = `${this.options.systemPrompt}\n### Session update\n\n${delta.markdown}`
+      const objective = this.options.getObjective?.()
+      if (objective) promptText += `\n\n${buildObjectiveHint(objective)}`
       // The contract again at the very end: weak models forget the copy that
       // sits ahead of a 60-message delta (no_frame was 44/44 of parse fails).
       promptText += `\n\n${CONTRACT_REMINDER}`
@@ -451,8 +464,8 @@ export class Reviewer {
             this.options.logger?.debug?.('note suppressed by emission guard')
             return { outcome: 'suppressed' }
           }
-          this.options.onNote(parsed.note)
-          return { outcome: 'note' }
+          this.options.onNote(parsed.note, parsed.category)
+          return { outcome: 'note', category: parsed.category }
         }
         const reply = text.slice(0, 200) || `<empty reply, finish=${finishKind}>`
         if (parseAttempt === 0) {
@@ -488,6 +501,9 @@ export class Reviewer {
     const candidate: SupervisorNote = { note: clipped, severity }
     if (!isNote(candidate)) return { kind: 'unparseable', reason: 'bad_shape' }
     if (CONTENT_FREE_PHRASES.has(normalizeNote(clipped))) return { kind: 'silent' }
-    return { kind: 'note', note: candidate }
+    const category = typeof parsed.category === 'string' && KNOWN_CATEGORY_IDS.has(parsed.category)
+      ? parsed.category
+      : undefined
+    return { kind: 'note', note: candidate, category }
   }
 }

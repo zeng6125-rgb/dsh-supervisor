@@ -68,6 +68,27 @@ export class SupervisorDelivery {
     return (this.pending.get(sessionId)?.length ?? 0) > 0
   }
 
+  /**
+   * Hand over every queued note and empty the queue. Used when a note is
+   * spoken by a wake instead of by a step, so the same reminder cannot ride a
+   * later step as well.
+   */
+  takePending(sessionId: string): SupervisorNote[] {
+    const queue = this.pending.get(sessionId) ?? []
+    this.pending.delete(sessionId)
+    this.raisedTurn.delete(sessionId)
+    return queue
+  }
+
+  /**
+   * Read the newest queued note without consuming it, and expire the attach
+   * cooldown for the session so a wake is not followed by an immediate attach
+   * of the same note.
+   */
+  stampWake(sessionId: string): void {
+    this.lastAttach.set(sessionId, this.now())
+  }
+
   private buildMessage(note: SupervisorNote): any {
     const text = renderNoteText(note)
     return this.options.createUserMessage({

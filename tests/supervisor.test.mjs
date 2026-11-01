@@ -87,6 +87,7 @@ test('resolveConfig unwraps volatile references', () => {
     reviewProvider: volatile('qwen'),
     reviewModel: volatile('qwen3.8-max'),
     attachIntervalSec: volatile(60),
+    wakeGuard: volatile(false),
   })
   assert.deepEqual(cfg, {
     enabled: false,
@@ -101,6 +102,7 @@ test('resolveConfig unwraps volatile references', () => {
     reviewProvider: 'qwen',
     reviewModel: 'qwen3.8-max',
     attachIntervalSec: 60,
+    wakeGuard: false,
   })
 })
 
@@ -115,7 +117,7 @@ test('the exported schema declares every field volatile', () => {
   // The settings service skips namespaces with no volatile field, so losing one
   // silently removes the row's configure form from the Plugins page.
   // An object schema keeps its fields under `dict`, each already a Schema.
-  const fields = ['enabled', 'stepsBetweenReviews', 'intercept', 'maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens', 'fallbackProvider', 'fallbackModel', 'fallbackAfterErrors', 'reviewProvider', 'reviewModel', 'attachIntervalSec']
+  const fields = ['enabled', 'stepsBetweenReviews', 'intercept', 'maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens', 'fallbackProvider', 'fallbackModel', 'fallbackAfterErrors', 'reviewProvider', 'reviewModel', 'attachIntervalSec', 'wakeGuard']
   for (const field of fields) {
     assert.equal(ConfigSchema.dict[field].meta.volatile, true, `${field} is not volatile`)
   }
@@ -341,6 +343,72 @@ function reviewer(llm, options = {}) {
 }
 
 const delta = (markdown) => ({ markdown, steps: 6 })
+
+test('a note carries its category, which is what decides a wake', async () => {
+  // The category is not decoration: `stopped_early` is the only class allowed
+  // to push an idle agent back to work, so an unknown or missing id must not
+  // be mistaken for it.
+  const llm = fakeLlm([[JSON.stringify({ note: '还有两步没做完就停了', severity: 'concern', category: 'stopped_early' })]])
+  const seen = []
+  const { r, notes } = reviewer(llm, { onNote: (n, c) => { notes.push(n); seen.push(c) } })
+  r.enqueue(delta('**agent:** done, I think'))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0], 'stopped_early')
+  assert.equal(r.state, 'idle')
+})
+
+test('an unknown category is dropped instead of trusted', async () => {
+  const llm = fakeLlm([[JSON.stringify({ note: '问题', severity: 'concern', category: 'invented_id' })]])
+  const seen = []
+  const { r } = reviewer(llm, { onNote: (n, c) => seen.push(c) })
+  r.enqueue(delta('**agent:** x'))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0], undefined, 'an id outside the closed set never reaches the wake decision')
+})
+
+test('an active goal rides into the review prompt as the objective', async () => {
+  // "Is this finished?" is an opinion about prose until the target is stated.
+  const llm = fakeLlm([[JSON.stringify({ note: 'Nothing to add' })]])
+  const { r } = reviewer(llm, {
+    getObjective: () => ({ objective: 'migrate the runner to eight arms', roundsStarted: 3, maxGoalRounds: 20 }),
+  })
+  r.enqueue(delta('**agent:** done'))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  const prompt = llm.calls[0].messages[0].content[0].text
+  assert.match(prompt, /### Objective/)
+  assert.match(prompt, /migrate the runner to eight arms/)
+  assert.match(prompt, /round 3\/20/)
+  assert.match(prompt, /the goal owner closes it, not you/, 'the reviewer never closes a goal')
+})
+
+test('no active goal means no objective block at all', async () => {
+  const llm = fakeLlm([[JSON.stringify({ note: 'Nothing to add' })]])
+  const { r } = reviewer(llm, { getObjective: () => undefined })
+  r.enqueue(delta('**agent:** done'))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.doesNotMatch(llm.calls[0].messages[0].content[0].text, /### Objective/)
+})
+
+test('taking the queue leaves nothing for a later step to attach', () => {
+  // A wake speaks the note itself; the same reminder must not ride a step too.
+  const { d } = delivery()
+  d.raise(sid, note('A'))
+  d.raise(sid, note('B'))
+  assert.deepEqual(d.takePending(sid).map((n) => n.note), ['A', 'B'])
+  assert.equal(d.hasPending(sid), false)
+  const decision = d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u1' }] }, 1)
+  assert.equal(decision.messages.length, 1, 'nothing left to append')
+})
+
+test('the wake guard is on by default and can be turned off', () => {
+  assert.equal(resolveConfig(undefined).wakeGuard, true)
+  assert.equal(resolveConfig({ wakeGuard: false }).wakeGuard, false)
+  // Only a real boolean is trusted; junk falls back to the default rather than
+  // being read as truthy, which would silently re-arm the guard.
+  assert.equal(resolveConfig({ wakeGuard: 'no' }).wakeGuard, true)
+})
 
 test('reviewer parses a bare JSON frame and emits the note', async () => {
   const llm = fakeLlm([['{"note": "you asserted the flag exists without checking", "severity": "concern"}']])
@@ -1010,11 +1078,13 @@ test('six steps produce one queued note that rides the next turn', async () => {
 
 // ── problem categories ──────────────────────────────────────────────────────
 
-test('the problem list stays seven categories', () => {
-  // The reviewer may only speak about these seven; growing the list silently
-  // widens what the supervisor is allowed to complain about.
-  assert.equal(PROBLEM_CATEGORIES.length, 7)
-  assert.equal(new Set(PROBLEM_CATEGORIES.map((c) => c.id)).size, 7, 'ids are unique')
+test('the problem list is a closed set of eight categories', () => {
+  // The reviewer may only speak about these; growing the list silently widens
+  // what the supervisor is allowed to complain about. `stopped_early` is the
+  // one that can wake an idle agent, so its id is load-bearing.
+  assert.equal(PROBLEM_CATEGORIES.length, 8)
+  assert.equal(new Set(PROBLEM_CATEGORIES.map((c) => c.id)).size, 8, 'ids are unique')
+  assert.ok(PROBLEM_CATEGORIES.some((c) => c.id === 'stopped_early'))
 })
 
 test('counters survive a restart through the persisted state file', async () => {

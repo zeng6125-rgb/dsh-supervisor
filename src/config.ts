@@ -34,6 +34,12 @@ export interface Config {
    * the newest one finally attaches.
    */
   attachIntervalSec: number
+  /**
+   * Push the agent back to work when a review says it stopped with work left
+   * and the agent is already idle. Off leaves the note on the panel only.
+   * Shares the attach cooldown, so a session cannot be woken in a loop.
+   */
+  wakeGuard: boolean
 }
 
 /**
@@ -55,6 +61,7 @@ export const Config = z.object({
   reviewProvider: z.string().default('').volatile(),
   reviewModel: z.string().default('').volatile(),
   attachIntervalSec: z.number().min(0).max(3600).default(180).volatile(),
+  wakeGuard: z.boolean().default(true).volatile(),
 })
 
 const DEFAULTS: Required<Config> = {
@@ -79,6 +86,9 @@ const DEFAULTS: Required<Config> = {
   // At most one spoken note per session per 3 minutes: measured attaches 22s
   // to 2min apart on a busy session read as back-to-back supervision.
   attachIntervalSec: 180,
+  // On by default: the whole point is that a stopped-but-unfinished session
+  // gets pushed once, and the cooldown above bounds how often that can happen.
+  wakeGuard: true,
 }
 
 /**
@@ -132,5 +142,6 @@ export function resolveConfig(raw: unknown): Required<Config> {
     reviewProvider: str(source.reviewProvider, DEFAULTS.reviewProvider),
     reviewModel: str(source.reviewModel, DEFAULTS.reviewModel),
     attachIntervalSec: num(source.attachIntervalSec, DEFAULTS.attachIntervalSec, 0),
+    wakeGuard: bool(source.wakeGuard, DEFAULTS.wakeGuard),
   }
 }

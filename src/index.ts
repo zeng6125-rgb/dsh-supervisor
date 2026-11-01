@@ -18,7 +18,7 @@ import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 
 import { Config, resolveConfig } from './config.js'
 import { SupervisorDelivery } from './delivery.js'
-import { REVIEWER_CLAIM_KEY, SUPERVISOR_PLUGIN_ID, type SupervisorNote } from './kinds.js'
+import { REVIEWER_CLAIM_KEY, SUPERVISOR_PLUGIN_ID, SUPERVISOR_SOURCE_KIND, type SupervisorNote } from './kinds.js'
 import { SUPERVISOR_SYSTEM_PROMPT } from './prompts.js'
 import { Reviewer, type ReviewerRoute } from './review.js'
 import { SupervisorState } from './state.js'
@@ -70,6 +70,10 @@ function signature(cfg: Config): string {
     cfg.fallbackAfterErrors,
     cfg.reviewProvider,
     cfg.reviewModel,
+    // Both are read live off `cfg`, so a change to either is only real once
+    // this function notices it and the plugin swaps the reference.
+    cfg.attachIntervalSec,
+    cfg.wakeGuard,
   ].join('\u0000')
 }
 
@@ -91,6 +95,7 @@ const CONFIG_VALUE_KINDS: Record<string, 'boolean' | 'number' | 'string' | 'rout
   fallbackRoute: 'route',
   fallbackAfterErrors: 'number',
   attachIntervalSec: 'number',
+  wakeGuard: 'boolean',
 }
 
 /** Route keys a combined picker writes, and the config fields they map to. */
@@ -184,6 +189,13 @@ export function apply(ctx0: Context, config?: unknown): void {
    *  per step repeats the whole history, so notes must be de-duplicated). */
   const imageNotes = new Map<string, Set<string>>()
   const pendingImages = new Map<string, Array<{ mediaType: string; data: string }>>()
+  /** Live agents by session id: the goal service and the wake both need the
+   *  real instance, not an id (`goals.get` rejects anything else). */
+  const liveAgents = new Map<string, any>()
+  /** Notes that earned a wake, held until the agent actually reaches idle. */
+  const awakePending = new Map<string, SupervisorNote>()
+  /** Last wake per session, so the cooldown bounds the pushes too. */
+  const lastWake = new Map<string, number>()
 
   const delivery = new SupervisorDelivery({
     intercept: cfg.intercept,
@@ -196,6 +208,32 @@ export function apply(ctx0: Context, config?: unknown): void {
 
   const syncPending = (sessionId: string): void => {
     state.setSession(sessionId, { pending: delivery.hasPending(sessionId) })
+  }
+
+  /**
+   * The session's open goal, read through the service without declaring it in
+   * `inject`: the goal packages are optional in a profile and a hard
+   * dependency would make the supervisor unmountable without them.
+   */
+  const objectiveOf = (
+    sessionId: string,
+  ): { objective: string; roundsStarted: number; maxGoalRounds: number } | undefined => {
+    try {
+      const goals = (ctx0 as any).get?.('goals')
+      const agent = liveAgents.get(sessionId)
+      if (!goals?.get || !agent) return undefined
+      const view = goals.get(agent)
+      // A closed goal is the goal owner's verdict, not a work item: only an
+      // active one may be held against the agent.
+      if (!view || view.phase !== 'active' || typeof view.objective !== 'string') return undefined
+      return {
+        objective: view.objective,
+        roundsStarted: Number(view.roundsStarted ?? 0),
+        maxGoalRounds: Number(view.maxGoalRounds ?? 0),
+      }
+    } catch {
+      return undefined // a disarmed or absent goal service is not an error
+    }
   }
 
   /** Reviewers are created lazily; the route may not be known yet. */
@@ -250,13 +288,18 @@ export function apply(ctx0: Context, config?: unknown): void {
         )
         log.warn('review session blind: route failing with no fallback configured', { sessionId, ...info })
       },
-      onNote: (note: SupervisorNote) => {
+      getObjective: () => objectiveOf(sessionId),
+      onNote: (note: SupervisorNote, category?: string) => {
         // The note waits (see SupervisorDelivery) for a step the agent is
         // already entering: no inbox turn of its own, no held step.
         const channel = delivery.raise(sessionId, note)
         state.recordAlert(sessionId, note, channel)
         syncPending(sessionId)
-        log.debug('note raised', { sessionId, severity: note.severity, channel })
+        // Only "you stopped with work left" earns a push, and only while the
+        // agent is still busy: if it goes idle, the status listener below
+        // speaks; if it keeps working, the note rides a step as usual.
+        if (category === 'stopped_early' && cfg.wakeGuard) awakePending.set(sessionId, note)
+        log.debug('note raised', { sessionId, severity: note.severity, channel, category })
       },
       onStateChange: (next) => {
         state.setSession(sessionId, { reviewer: next })
@@ -312,6 +355,9 @@ export function apply(ctx0: Context, config?: unknown): void {
     routes.delete(sessionId)
     imageNotes.delete(sessionId)
     pendingImages.delete(sessionId)
+    liveAgents.delete(sessionId)
+    awakePending.delete(sessionId)
+    lastWake.delete(sessionId)
     delivery.clear(sessionId)
     state.dropSession(sessionId)
   }
@@ -382,6 +428,7 @@ export function apply(ctx0: Context, config?: unknown): void {
       try {
         const sessionId = String(agent?.id)
         if (sessionId && sessionId !== 'undefined') {
+          liveAgents.set(sessionId, agent)
           ensureReviewer(sessionId)
           const route = routes.get(sessionId)
           if (route) state.setSession(sessionId, { route })
@@ -404,6 +451,65 @@ export function apply(ctx0: Context, config?: unknown): void {
       { global: true } as never,
     )
   }
+
+  // ── push a stopped-but-unfinished session back to work ──────────────────────
+  // The note path can only ride a step the agent already enters; a session that
+  // went idle needs a turn of its own, which is exactly what `followup` opens.
+  // Three things bound it: only a `stopped_early` note, only at whole-agent
+  // idle, and only once per attach cooldown — a review that flags the same stop
+  // twice cannot loop the conversation.
+  on(
+    'agent/status',
+    ({ agent, status }: any) => {
+      try {
+        if (status !== 'idle') return
+        const sessionId = String(agent?.id)
+        if (!sessionId || sessionId === 'undefined') return
+        if (!cfg.wakeGuard || !cfg.enabled) return
+        const note = awakePending.get(sessionId)
+        if (!note) return
+        awakePending.delete(sessionId)
+        const cooldown = cfg.attachIntervalSec * 1000
+        if (cooldown > 0) {
+          const last = lastWake.get(sessionId)
+          if (last !== undefined && Date.now() - last < cooldown) return
+        }
+        // A goal that is no longer active belongs to its owner's verdict: the
+        // host already decided the work is done, paused, or blocked.
+        const goals = (ctx0 as any).get?.('goals')
+        try {
+          const view = goals?.get?.(agent)
+          if (view && view.phase !== 'active') return
+        } catch {
+          // Goal service asleep or the agent is no longer live: not a reason
+          // to skip a push the transcript itself earned.
+        }
+        // The note must not also ride a step later: hand it over here.
+        delivery.takePending(sessionId)
+        delivery.stampWake(sessionId)
+        syncPending(sessionId)
+        lastWake.set(sessionId, Date.now())
+        const wakeText =
+          `[supervisor:${note.severity}] ${note.note}` +
+          '\n\n你停了下来，但上面的问题说明还有没做完的部分——请继续把它做完。如果确实已经完成，说明理由再停。'
+        agent.followup?.(
+          createUserMessage({
+            content: [{ type: 'text', text: wakeText }],
+            source: {
+              kind: SUPERVISOR_SOURCE_KIND,
+              form: 'notice',
+              summary: boundContextSummary(wakeText.slice('[supervisor:'.length)),
+            },
+          }),
+        )
+        log.debug('agent pushed back to work after stopping early', { sessionId })
+      } catch (error) {
+        // Advisory only: a failed push must never break the session.
+        log.warn('wake after idle failed', { error: String(error) })
+      }
+    },
+    { global: true } as never,
+  )
 
   // ── route capture ───────────────────────────────────────────────────────────
   // No provider/model configuration of our own: the reviewer uses whatever the
@@ -591,6 +697,7 @@ export function apply(ctx0: Context, config?: unknown): void {
                   fallbackRoute: cfg.fallbackProvider + '\u0000' + cfg.fallbackModel,
                   fallbackAfterErrors: cfg.fallbackAfterErrors,
                   attachIntervalSec: cfg.attachIntervalSec,
+                  wakeGuard: cfg.wakeGuard,
                 },
               }
             } else if (sub === '/models') {
