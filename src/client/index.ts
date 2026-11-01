@@ -45,7 +45,7 @@ interface Snapshot {
   enabled?: boolean
   intercept?: boolean
   stepsBetweenReviews?: number
-  totals?: { sessions: number; steps: number; reviews: number; notes: number; unhealthy: number; outcomes: Record<string, number>; parseFails?: Record<string, number>; parseFailsByRoute?: Record<string, Record<string, number>>; errorKinds?: Record<string, number> }
+  totals?: { sessions: number; steps: number; reviews: number; notes: number; unhealthy: number; outcomes: Record<string, number>; parseFails?: Record<string, number>; parseFailsByRoute?: Record<string, Record<string, number>>; errorKinds?: Record<string, number>; noteCategories?: Record<string, number> }
   alerts?: Alert[]
   sessions?: SessionState[]
   error?: string
@@ -375,6 +375,18 @@ function shortId(sessionId: string): string {
 
 // Host state strings → Chinese, for the live-status panel only (the machine
 // values stay English in the API payload).
+var CAT_ZH: Record<string, string> = {
+  read_selectively: '选择性读',
+  unsaid_finding: '隐瞒发现',
+  ungrounded_claim: '无据断言',
+  untried_impossible: '没试就说不行',
+  scope_creep: '范围蔓延',
+  blind_tuning: '盲调',
+  done_then_changed: '完工又改',
+  stopped_early: '停手早',
+  unreported: '未报类',
+}
+
 var REVIEWER_ZH: Record<string, string> = {
   idle: '空闲',
   working: '审查中',
@@ -1082,6 +1094,17 @@ function Status(props: { live: Snapshot; titleOf?: (sessionId: string) => string
         if (n) kindParts.push(KIND_ZH[kind] || kind + ' ' + n)
       }
       if (kindParts.length) outcomes.push('失败 ' + kindParts.join(' · '))
+    }
+    // Which categories the notes actually reported: `未报类` is the share that
+    // omitted the field, and only `停手早` can wake an idle session.
+    var cats = totals.noteCategories
+    if (cats) {
+      var catParts: string[] = []
+      for (var cat of Object.keys(cats)) {
+        var m = cats[cat]
+        if (m) catParts.push((CAT_ZH[cat] || cat) + ' ' + m)
+      }
+      if (catParts.length) outcomes.push('提醒类别 ' + catParts.join(' · '))
     }
   }
 

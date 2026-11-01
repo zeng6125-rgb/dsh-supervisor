@@ -18,6 +18,8 @@ export interface SupervisorAlert {
   readonly at: number
   readonly channel: DeliveryChannel
   readonly acked: boolean
+  /** The note's self-reported category; absent when the route omitted it. */
+  readonly category?: string
 }
 
 export interface SupervisorSessionState {
@@ -46,6 +48,13 @@ export interface SupervisorSessionState {
   readonly errorKinds?: Readonly<Record<string, number>>
   /** A queued note is waiting to ride the next step the agent enters. */
   readonly pending: boolean
+  /**
+   * Notes by self-reported category, `unreported` included. Measures whether
+   * the contract's `category` field is actually produced in real traffic —
+   * without it, a wake that never fires is indistinguishable from a quiet one.
+   * In-memory only: pre-existing history has no category to backfill.
+   */
+  readonly noteCategories?: Readonly<Record<string, number>>
 }
 
 /** Outcomes that mean the reviewer is not doing its job; surfaced as a warning. */
@@ -103,7 +112,27 @@ export class SupervisorState {
     }
   }
 
-  recordAlert(sessionId: string, note: SupervisorNote, channel: DeliveryChannel): SupervisorAlert {
+  /**
+   * One note's self-reported category. `undefined` means the route omitted the
+   * field, which is counted rather than hidden: that rate decides whether the
+   * wake guard can ever fire.
+   */
+  recordNoteCategory(sessionId: string, category: string | undefined): void {
+    const current = this.sessions.get(sessionId)
+    if (!current) return
+    const key = category ?? 'unreported'
+    const next = { ...(current.noteCategories ?? {}) }
+    next[key] = (next[key] ?? 0) + 1
+    this.setSession(sessionId, { noteCategories: next })
+    this.scheduleFlush()
+  }
+
+  recordAlert(
+    sessionId: string,
+    note: SupervisorNote,
+    channel: DeliveryChannel,
+    category?: string,
+  ): SupervisorAlert {
     const alert: SupervisorAlert = {
       id: `s${++this.seq}`,
       sessionId,
@@ -112,6 +141,7 @@ export class SupervisorState {
       at: Date.now(),
       channel,
       acked: false,
+      ...(category ? { category } : {}),
     }
     this.alerts.unshift(alert)
     while (this.alerts.length > MAX_ALERTS) this.alerts.pop()
@@ -239,11 +269,14 @@ export class SupervisorState {
     parseFailsByRoute: Record<string, Record<string, number>>
     /** Failed reviews by fingerprint (`timeout`, `rate-limit`, …). */
     errorKinds: Record<string, number>
+    /** Notes by reported category; `unreported` counts notes that omitted it. */
+    noteCategories: Record<string, number>
   } {
     const outcomes: Record<string, number> = {}
     const parseFails: Record<string, number> = {}
     const parseFailsByRoute: Record<string, Record<string, number>> = {}
     const errorKinds: Record<string, number> = {}
+    const noteCategories: Record<string, number> = {}
     let steps = 0
     let reviews = 0
     for (const session of this.all()) {
@@ -261,6 +294,9 @@ export class SupervisorState {
       for (const [kind, count] of Object.entries(session.errorKinds ?? {})) {
         errorKinds[kind] = (errorKinds[kind] ?? 0) + count
       }
+      for (const [category, count] of Object.entries(session.noteCategories ?? {})) {
+        noteCategories[category] = (noteCategories[category] ?? 0) + count
+      }
     }
     const unhealthy = UNHEALTHY_OUTCOMES.reduce((sum, outcome) => sum + (outcomes[outcome] ?? 0), 0)
     return {
@@ -273,6 +309,7 @@ export class SupervisorState {
       parseFails,
       parseFailsByRoute,
       errorKinds,
+      noteCategories,
     }
   }
 

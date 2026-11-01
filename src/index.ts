@@ -23,6 +23,7 @@ import { SUPERVISOR_SYSTEM_PROMPT } from './prompts.js'
 import { Reviewer, type ReviewerRoute } from './review.js'
 import { SupervisorState } from './state.js'
 import { SessionTranscript } from './transcript.js'
+import { shouldWake, WAKE_CATEGORY, type GoalPhase } from './wake.js'
 
 export { Config }
 export const name = SUPERVISOR_PLUGIN_ID
@@ -194,6 +195,8 @@ export function apply(ctx0: Context, config?: unknown): void {
   const liveAgents = new Map<string, any>()
   /** Notes that earned a wake, held until the agent actually reaches idle. */
   const awakePending = new Map<string, SupervisorNote>()
+  /** The category of the held note, so the decision sees it at idle time. */
+  const pendingCategory = new Map<string, string>()
   /** Last wake per session, so the cooldown bounds the pushes too. */
   const lastWake = new Map<string, number>()
 
@@ -293,12 +296,16 @@ export function apply(ctx0: Context, config?: unknown): void {
         // The note waits (see SupervisorDelivery) for a step the agent is
         // already entering: no inbox turn of its own, no held step.
         const channel = delivery.raise(sessionId, note)
-        state.recordAlert(sessionId, note, channel)
+        state.recordAlert(sessionId, note, channel, category)
         syncPending(sessionId)
         // Only "you stopped with work left" earns a push, and only while the
         // agent is still busy: if it goes idle, the status listener below
         // speaks; if it keeps working, the note rides a step as usual.
-        if (category === 'stopped_early' && cfg.wakeGuard) awakePending.set(sessionId, note)
+        state.recordNoteCategory(sessionId, category)
+        if (category === WAKE_CATEGORY && cfg.wakeGuard) {
+          awakePending.set(sessionId, note)
+          pendingCategory.set(sessionId, category)
+        }
         log.debug('note raised', { sessionId, severity: note.severity, channel, category })
       },
       onStateChange: (next) => {
@@ -357,6 +364,7 @@ export function apply(ctx0: Context, config?: unknown): void {
     pendingImages.delete(sessionId)
     liveAgents.delete(sessionId)
     awakePending.delete(sessionId)
+    pendingCategory.delete(sessionId)
     lastWake.delete(sessionId)
     delivery.clear(sessionId)
     state.dropSession(sessionId)
@@ -465,25 +473,29 @@ export function apply(ctx0: Context, config?: unknown): void {
         if (status !== 'idle') return
         const sessionId = String(agent?.id)
         if (!sessionId || sessionId === 'undefined') return
-        if (!cfg.wakeGuard || !cfg.enabled) return
         const note = awakePending.get(sessionId)
         if (!note) return
-        awakePending.delete(sessionId)
-        const cooldown = cfg.attachIntervalSec * 1000
-        if (cooldown > 0) {
-          const last = lastWake.get(sessionId)
-          if (last !== undefined && Date.now() - last < cooldown) return
-        }
-        // A goal that is no longer active belongs to its owner's verdict: the
-        // host already decided the work is done, paused, or blocked.
-        const goals = (ctx0 as any).get?.('goals')
+        // Ask the goal service what it knows. An unreachable service is not a
+        // reason to skip a push the transcript itself earned, so a probe that
+        // throws resolves to "no goal".
+        let goalPhase: GoalPhase | undefined
         try {
-          const view = goals?.get?.(agent)
-          if (view && view.phase !== 'active') return
+          const view = (ctx0 as any).get?.('goals')?.get?.(agent)
+          goalPhase = view?.phase
         } catch {
-          // Goal service asleep or the agent is no longer live: not a reason
-          // to skip a push the transcript itself earned.
+          goalPhase = undefined
         }
+        const allowed = shouldWake({
+          category: pendingCategory.get(sessionId),
+          guardEnabled: cfg.wakeGuard && cfg.enabled,
+          cooldownMs: cfg.attachIntervalSec * 1000,
+          lastWakeAt: lastWake.get(sessionId),
+          now: Date.now(),
+          goalPhase,
+        })
+        awakePending.delete(sessionId)
+        pendingCategory.delete(sessionId)
+        if (!allowed) return
         // The note must not also ride a step later: hand it over here.
         delivery.takePending(sessionId)
         delivery.stampWake(sessionId)

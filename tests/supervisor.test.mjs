@@ -14,6 +14,7 @@ import { SupervisorDelivery } from '../lib/delivery.js'
 import { Config as ConfigSchema, resolveConfig } from '../lib/config.js'
 import { SupervisorState } from '../lib/state.js'
 import { SUPERVISOR_SYSTEM_PROMPT, PROBLEM_CATEGORIES } from '../lib/prompts.js'
+import { shouldWake, WAKE_CATEGORY } from '../lib/wake.js'
 
 const sid = 'session-test'
 
@@ -1074,6 +1075,57 @@ test('six steps produce one queued note that rides the next turn', async () => {
     ['u7', '[supervisor:concern] you are asserting the config key exists without reading it'],
   )
   assert.equal(d.hasPending(sid), false)
+})
+
+// ── wake decision ────────────────────────────────────────────────────────────
+
+const wakeable = (over = {}) => ({
+  category: WAKE_CATEGORY,
+  guardEnabled: true,
+  cooldownMs: 180_000,
+  lastWakeAt: undefined,
+  now: 1_000_000,
+  goalPhase: undefined,
+  ...over,
+})
+
+test('a stopped-early note may wake an idle session', () => {
+  assert.equal(shouldWake(wakeable()), true)
+})
+
+test('no other category may open a turn', () => {
+  // This is the whole safeguard against the "extra turn" complaint: only one
+  // class of note is allowed to speak to a session that has gone quiet.
+  for (const id of PROBLEM_CATEGORIES.map((c) => c.id)) {
+    assert.equal(shouldWake(wakeable({ category: id })), id === WAKE_CATEGORY, `${id} decided wrongly`)
+  }
+  assert.equal(shouldWake(wakeable({ category: undefined })), false, 'a route that omits the field is not trusted')
+  assert.equal(shouldWake(wakeable({ category: 'made_up' })), false)
+})
+
+test('the guard switch and a closed goal both forbid a wake', () => {
+  assert.equal(shouldWake(wakeable({ guardEnabled: false })), false)
+  assert.equal(shouldWake(wakeable({ goalPhase: 'complete' })), false, 'the owner closed it')
+  assert.equal(shouldWake(wakeable({ goalPhase: 'paused' })), false)
+  assert.equal(shouldWake(wakeable({ goalPhase: 'blocked' })), false)
+  assert.equal(shouldWake(wakeable({ goalPhase: 'active' })), true, 'an open goal is a work item')
+})
+
+test('the cooldown bounds wakes and 0 disables the window', () => {
+  assert.equal(shouldWake(wakeable({ lastWakeAt: 1_000_000 - 1000 })), false, 'inside the window')
+  assert.equal(shouldWake(wakeable({ lastWakeAt: 1_000_000 - 180_000 })), true, 'window exactly elapsed')
+  assert.equal(shouldWake(wakeable({ lastWakeAt: 1_000_000 - 1000, cooldownMs: 0 })), true, 'window disabled')
+})
+
+test('notes are counted by category, and an unreported one is visible', () => {
+  // Without this counter a wake that never fires is indistinguishable from a
+  // session that simply had nothing to report.
+  const state = new SupervisorState()
+  state.setSession('s1', {})
+  state.recordNoteCategory('s1', 'stopped_early')
+  state.recordNoteCategory('s1', 'stopped_early')
+  state.recordNoteCategory('s1', undefined)
+  assert.deepEqual(state.totals().noteCategories, { stopped_early: 2, unreported: 1 })
 })
 
 // ── problem categories ──────────────────────────────────────────────────────
