@@ -806,6 +806,8 @@ var FIELDS: FieldSpec[] = [
   { key: 'stepsBetweenReviews', label: '审查间隔（步）', hint: '每多少步审查一次。额外 token 成本约为 1/N。', min: 1, max: 60 },
   { key: 'intercept', label: '下一步即附加', hint: '提醒默认等你下次提问时才进入会话；开启后它随下一个 step 附加（不重排、不打断轮次）。', toggle: true },
   { key: 'attachIntervalSec', label: '附加限流（秒）', hint: '同一会话两次附加提醒之间的最小间隔：活跃会话不会每轮都被插话。冷却期间攒下的旧提醒只上面板，到点附加最新一条。0 = 关闭限流。', min: 0, max: 3600 },
+  { key: 'predictEnabled', label: '输入框续写建议', hint: '会话空闲且输入框为空时，用一条灰色短句替换官方 placeholder，预测你接下来想说什么；Tab 接受，Esc 或继续打字丢弃。运行中的会话不显示。', toggle: true },
+  { key: 'predictChars', label: '续写长度上限（字）', hint: '建议的最长字数。越长越容易变成噪音。', min: 10, max: 200 },
   { key: 'wakeGuard', label: '停滞即唤醒', hint: '审查判定「还有活没干完就停」且 agent 已空闲时，把它推回工作；与附加限流共用冷却窗口，不会连环唤醒。它只补一句提醒，不替 agent 做决定。', toggle: true },
   { key: 'fallbackRoute', label: '回退路由', hint: '审查路由连续失败后切到这条路由；留空则不启用回退，连续失败时面板会亮失明提醒。', select: 'route', ph: '不启用' },
   { key: 'fallbackAfterErrors', label: '回退触发（连败次数）', hint: '连续多少次 transient 失败后切回退路由。', min: 1, max: 20 },
@@ -948,7 +950,7 @@ function ConfigCard(props: CardProps) {
 
   // Four sectioned cards; every config key lives in exactly one.
   var GROUPS: Array<{ title: string; keys: string[] }> = [
-    { title: '运行', keys: ['enabled', 'stepsBetweenReviews', 'intercept', 'attachIntervalSec', 'wakeGuard'] },
+    { title: '运行', keys: ['enabled', 'stepsBetweenReviews', 'intercept', 'attachIntervalSec', 'wakeGuard', 'predictEnabled', 'predictChars'] },
     { title: '审查模型', keys: ['reviewRoute'] },
     { title: '故障回退', keys: ['fallbackRoute', 'fallbackAfterErrors'] },
     { title: '增量与预算', keys: ['maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens'] },
@@ -1315,6 +1317,153 @@ function installSettingsNavIcon(): () => void {
   }
 }
 
+// ── composer ghost continuation ─────────────────────────────────────────────
+// When a session is IDLE and its input box is empty, the shipped placeholder is
+// replaced by a short grey guess at what the user will type next; Tab accepts
+// it. The running check lives on the host (`/predict` answers it first), because
+// only the host knows whether the agent is mid-stream.
+var GHOST_LIVE_CLASS = 'dsv-predict-live'
+/** The shipped placeholder is a real element carrying this attribute. */
+var GHOST_PLACEHOLDER = '[data-composer-placeholder]'
+/** Recheck cadence while the session is running or the box stays empty. */
+var GHOST_RECHECK_MS = 2500
+
+function ghostMeasure() {
+  var node = document.querySelector(GHOST_PLACEHOLDER)
+  if (!node) return undefined
+  var rect = node.getBoundingClientRect()
+  var style = window.getComputedStyle(node)
+  return {
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height,
+    font: style.font && style.font !== '' ? style.font : style.fontSize + ' ' + style.fontFamily,
+    lineHeight: style.lineHeight,
+  }
+}
+
+function Ghost(props: any) {
+  var draft = props.useInput(function (state: any) { return typeof state?.draft === 'string' ? state.draft : '' })
+  var textState = React.useState('')
+  var text = textState[0]
+  var setText = textState[1]
+  var boxState = React.useState(undefined)
+  var box = boxState[0]
+  var setBox = boxState[1]
+  var empty = draft.trim().length === 0
+
+  React.useEffect(function () {
+    if (!empty) {
+      setText('')
+      return
+    }
+    var live = true
+    var timer: any = 0
+    var controller: AbortController | undefined
+    var ask = function (): void {
+      controller = new AbortController()
+      void fetch(API + '/predict', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: props.sessionId }),
+        signal: controller.signal,
+      })
+        .then(function (response) { return response.json() })
+        .then(function (body: any) {
+          if (!live) return
+          var suggestion = typeof body?.suggestion === 'string' ? body.suggestion.trim() : ''
+          setText(suggestion)
+          // A running session may go idle any moment, and an accepted suggestion
+          // expires: recheck while it is running or while nothing was found.
+          if (body?.running === true || suggestion === '') {
+            timer = window.setTimeout(ask, GHOST_RECHECK_MS)
+          }
+        })
+        .catch(function () { /* aborted or offline */ })
+    }
+    ask()
+    return function () {
+      live = false
+      controller?.abort()
+      if (timer) window.clearTimeout(timer)
+    }
+  }, [empty, props.sessionId, draft])
+
+  // Measure the placeholder while a suggestion stands in for it; it moves with
+  // layout and scroll, and a stale box puts the text in the wrong place.
+  React.useEffect(function () {
+    if (empty && text) {
+      var sync = function (): void { setBox(ghostMeasure()) }
+      sync()
+      window.addEventListener('resize', sync)
+      window.addEventListener('scroll', sync, true)
+      return function () {
+        window.removeEventListener('resize', sync)
+        window.removeEventListener('scroll', sync, true)
+      }
+    }
+    setBox(undefined)
+    return
+  }, [empty, text])
+
+  var usable = empty && !!text && !!box
+
+  React.useEffect(function () {
+    if (!usable) return
+    document.body.classList.add(GHOST_LIVE_CLASS)
+    return function () { document.body.classList.remove(GHOST_LIVE_CLASS) }
+  }, [usable])
+
+  React.useEffect(function () {
+    if (!usable) return
+    var onKeyDown = function (event: KeyboardEvent): void {
+      if (event.defaultPrevented) return
+      if (event.key === 'Escape') { setText(''); return }
+      if (event.key !== 'Tab') return
+      if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey) return
+      var active = document.activeElement
+      if (!(active instanceof HTMLElement) || !active.isContentEditable) return
+      event.preventDefault()
+      event.stopPropagation()
+      props.inputActions.setDraft(text)
+      setText('')
+    }
+    document.addEventListener('keydown', onKeyDown, true)
+    return function () { document.removeEventListener('keydown', onKeyDown, true) }
+  }, [usable, text, props.inputActions])
+
+  if (!usable || !box) return null
+  return h(
+    React.Fragment,
+    null,
+    h('style', null, 'body.' + GHOST_LIVE_CLASS + ' ' + GHOST_PLACEHOLDER + '{visibility:hidden !important}'),
+    h(
+      'div',
+      {
+        className: 'dsv-predict-ghost',
+        'aria-hidden': 'true',
+        style: {
+          position: 'fixed',
+          left: box.left + 'px',
+          top: box.top + 'px',
+          width: box.width + 'px',
+          height: box.height + 'px',
+          font: box.font,
+          lineHeight: box.lineHeight,
+          pointerEvents: 'none',
+          color: 'var(--dsw-alias-text-tertiary, #9aa0a6)',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          zIndex: 2,
+        },
+      },
+      text,
+    ),
+  )
+}
+
 function registerAll(ctx: any): () => void {
   var slots = ctx.slots
   var disposers: Array<() => void> = []
@@ -1350,6 +1499,13 @@ function registerAll(ctx: any): () => void {
         { name: 'conversation.chat.node', key: 'context', priority: -1, locale: 'chat' },
         makeShadowView(slots, 'context', '上下文注入'),
       )
+    }),
+  )
+  // Composer ghost: the only seat that reads the draft and can stand in for the
+  // shipped placeholder.
+  disposers.push(
+    slots.inject('conversation.input.overlay', function () {
+      return slots.register({ name: 'conversation.input.overlay', id: PLUGIN_ID + '.ghost', order: 5, label: '续写建议' }, Ghost)
     }),
   )
   disposers.push(installSettingsNavIcon())

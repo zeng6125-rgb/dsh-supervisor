@@ -89,6 +89,8 @@ test('resolveConfig unwraps volatile references', () => {
     reviewModel: volatile('qwen3.8-max'),
     attachIntervalSec: volatile(60),
     wakeGuard: volatile(false),
+    predictEnabled: volatile(false),
+    predictChars: volatile(80),
   })
   assert.deepEqual(cfg, {
     enabled: false,
@@ -104,6 +106,8 @@ test('resolveConfig unwraps volatile references', () => {
     reviewModel: 'qwen3.8-max',
     attachIntervalSec: 60,
     wakeGuard: false,
+    predictEnabled: false,
+    predictChars: 80,
   })
 })
 
@@ -118,7 +122,7 @@ test('the exported schema declares every field volatile', () => {
   // The settings service skips namespaces with no volatile field, so losing one
   // silently removes the row's configure form from the Plugins page.
   // An object schema keeps its fields under `dict`, each already a Schema.
-  const fields = ['enabled', 'stepsBetweenReviews', 'intercept', 'maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens', 'fallbackProvider', 'fallbackModel', 'fallbackAfterErrors', 'reviewProvider', 'reviewModel', 'attachIntervalSec', 'wakeGuard']
+  const fields = ['enabled', 'stepsBetweenReviews', 'intercept', 'maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens', 'fallbackProvider', 'fallbackModel', 'fallbackAfterErrors', 'reviewProvider', 'reviewModel', 'attachIntervalSec', 'wakeGuard', 'predictEnabled', 'predictChars']
   for (const field of fields) {
     assert.equal(ConfigSchema.dict[field].meta.volatile, true, `${field} is not volatile`)
   }

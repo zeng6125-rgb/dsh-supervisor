@@ -40,6 +40,13 @@ export interface Config {
    * Shares the attach cooldown, so a session cannot be woken in a loop.
    */
   wakeGuard: boolean
+  /**
+   * Composer ghost continuation: when a session is idle and its input box is
+   * empty, show a short grey guess at what the user will type. Tab accepts it.
+   */
+  predictEnabled: boolean
+  /** Hard cap on the guess, in characters. A long ghost is noise. */
+  predictChars: number
 }
 
 /**
@@ -62,6 +69,8 @@ export const Config = z.object({
   reviewModel: z.string().default('').volatile(),
   attachIntervalSec: z.number().min(0).max(3600).default(180).volatile(),
   wakeGuard: z.boolean().default(true).volatile(),
+  predictEnabled: z.boolean().default(true).volatile(),
+  predictChars: z.number().min(10).max(200).default(40).volatile(),
 })
 
 const DEFAULTS: Required<Config> = {
@@ -89,6 +98,10 @@ const DEFAULTS: Required<Config> = {
   // On by default: the whole point is that a stopped-but-unfinished session
   // gets pushed once, and the cooldown above bounds how often that can happen.
   wakeGuard: true,
+  // Only a stopped session gets a ghost: while it runs, the route is busy and
+  // a guess would be stale before it arrived.
+  predictEnabled: true,
+  predictChars: 40,
 }
 
 /**
@@ -143,5 +156,7 @@ export function resolveConfig(raw: unknown): Required<Config> {
     reviewModel: str(source.reviewModel, DEFAULTS.reviewModel),
     attachIntervalSec: num(source.attachIntervalSec, DEFAULTS.attachIntervalSec, 0),
     wakeGuard: bool(source.wakeGuard, DEFAULTS.wakeGuard),
+    predictEnabled: bool(source.predictEnabled, DEFAULTS.predictEnabled),
+    predictChars: num(source.predictChars, DEFAULTS.predictChars, 10),
   }
 }

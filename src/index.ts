@@ -14,7 +14,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import type { Context } from '@deepseek-ai/cordis'
-import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { boundContextSummary, createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 
 import { Config, resolveConfig } from './config.js'
 import { SupervisorDelivery } from './delivery.js'
@@ -58,6 +58,24 @@ function appRootLlm(ctx: HostContext): any {
 }
 
 /** Cheap value fingerprint, used to tell our own config write from everyone else's. */
+/**
+ * Exact text of one user message event, or undefined for anything else. Only
+ * what the human typed counts: injected notes say nothing about what the user
+ * will type next.
+ */
+function userTextOf(event: any): string | undefined {
+  if (!event || event.type !== 'user/message') return undefined
+  const data = event.data ?? {}
+  if (data.source && data.source.kind !== 'user') return undefined
+  const parts = Array.isArray(data.content) ? data.content : []
+  const text = parts
+    .filter((part: any) => part && part.type === 'text' && typeof part.text === 'string')
+    .map((part: any) => part.text)
+    .join(' ')
+    .trim()
+  return text || undefined
+}
+
 function signature(cfg: Config): string {
   return [
     cfg.enabled,
@@ -75,6 +93,8 @@ function signature(cfg: Config): string {
     // this function notices it and the plugin swaps the reference.
     cfg.attachIntervalSec,
     cfg.wakeGuard,
+    cfg.predictEnabled,
+    cfg.predictChars,
   ].join('\u0000')
 }
 
@@ -97,6 +117,8 @@ const CONFIG_VALUE_KINDS: Record<string, 'boolean' | 'number' | 'string' | 'rout
   fallbackAfterErrors: 'number',
   attachIntervalSec: 'number',
   wakeGuard: 'boolean',
+  predictEnabled: 'boolean',
+  predictChars: 'number',
 }
 
 /** Route keys a combined picker writes, and the config fields they map to. */
@@ -190,6 +212,18 @@ export function apply(ctx0: Context, config?: unknown): void {
    *  per step repeats the whole history, so notes must be de-duplicated). */
   const imageNotes = new Map<string, Set<string>>()
   const pendingImages = new Map<string, Array<{ mediaType: string; data: string }>>()
+  /** Recent user messages per session, for the composer prediction. */
+  const predictRing = new Map<string, string[]>()
+  /** Sessions whose agent is currently running: no ghost while it streams. */
+  const runningSessions = new Set<string>()
+  /**
+   * One prediction per finished turn, cached. The request path only reads this,
+   * so a ghost costs the UI a few milliseconds instead of a model call — the
+   * call happens once, when the turn ends and the route is free.
+   */
+  const predictCache = new Map<string, { text: string; turn: number; at: number }>()
+  /** Sessions with a prediction in flight, so one turn cannot start two. */
+  const predicting = new Set<string>()
   /** Live agents by session id: the goal service and the wake both need the
    *  real instance, not an id (`goals.get` rejects anything else). */
   const liveAgents = new Map<string, any>()
@@ -208,6 +242,78 @@ export function apply(ctx0: Context, config?: unknown): void {
     boundContextSummary,
     logger: log,
   })
+
+  /**
+   * Which model predicts a session's next message: the pinned review route when
+   * one is configured (it is already the "auxiliary model" choice), otherwise
+   * whatever that session is running.
+   */
+  const predictRouteFor = (sessionId: string): { provider: string; model: string } | undefined => {
+    if (cfg.reviewProvider && cfg.reviewModel) {
+      return { provider: cfg.reviewProvider, model: cfg.reviewModel }
+    }
+    const route = routes.get(sessionId)
+    return route ? { provider: route.provider, model: route.model } : undefined
+  }
+
+  /**
+   * One prediction for one finished turn, stored for the composer to read. Any
+   * failure is silent: a missing ghost is invisible, a broken route is not.
+   */
+  async function runPrediction(sessionId: string, turn: number): Promise<void> {
+    if (!cfg.predictEnabled) return
+    if (predicting.has(sessionId)) return
+    const recent = (predictRing.get(sessionId) ?? []).slice(-4)
+    if (recent.length === 0) return
+    const route = predictRouteFor(sessionId)
+    if (!route) return
+    predicting.add(sessionId)
+    try {
+      const system = [
+        'You predict what the user will type next in a chat with a coding agent.',
+        'Output ONE short line: at most ' + cfg.predictChars + ' characters, in the same language as the recent messages.',
+        "It continues the user's next message - a request, a question or a reply, phrased as the user would type it.",
+        'No quotes, no explanation, no markdown.',
+        'If nothing sensible can be predicted, output nothing at all.',
+      ].join(' ')
+      let out = ''
+      const stream = (llm as never as { stream(options: unknown): AsyncIterable<any> }).stream({
+        provider: route.provider,
+        model: route.model,
+        messages: [
+          createUserMessage({
+            content: [
+              {
+                type: 'text',
+                text:
+                  `Recent user messages (oldest first):\n${recent.map((t, i) => `[${i + 1}] ${t}`).join('\n')}\n\n` +
+                  "Predict the user's next message.",
+              },
+            ],
+            source: { kind: 'user' },
+          }),
+        ],
+        system,
+        temperature: 0.6,
+        maxTokens: 96,
+        reasoningEffort: ReasoningEffortId('off'),
+      } as never)
+      for await (const chunk of stream) {
+        if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') out += chunk.text
+      }
+      const line =
+        out
+          .split('\n')
+          .map((part) => part.trim())
+          .find((part) => part.length > 0) ?? ''
+      const text = line.replace(/^["'“”「」]|["'“”「」]$/g, '').slice(0, cfg.predictChars)
+      if (text) predictCache.set(sessionId, { text, turn, at: Date.now() })
+    } catch (error) {
+      log.debug('prediction failed', { error: String(error) })
+    } finally {
+      predicting.delete(sessionId)
+    }
+  }
 
   const syncPending = (sessionId: string): void => {
     state.setSession(sessionId, { pending: delivery.hasPending(sessionId) })
@@ -362,6 +468,8 @@ export function apply(ctx0: Context, config?: unknown): void {
     routes.delete(sessionId)
     imageNotes.delete(sessionId)
     pendingImages.delete(sessionId)
+    predictRing.delete(sessionId)
+    runningSessions.delete(sessionId)
     liveAgents.delete(sessionId)
     awakePending.delete(sessionId)
     pendingCategory.delete(sessionId)
@@ -421,9 +529,34 @@ export function apply(ctx0: Context, config?: unknown): void {
     (session: any, event: any) => {
       try {
         transcript.handleEvent(String(session?.id), event)
+        const text = userTextOf(event)
+        const id = String(session?.id ?? '')
+        if (text && id) {
+          const ring = predictRing.get(id) ?? []
+          ring.push(text.slice(0, 400))
+          while (ring.length > 8) ring.shift()
+          predictRing.set(id, ring)
+        }
+        // A finished turn is the one moment worth predicting from: the route is
+        // free, the answer is just read, and the user is about to type.
+        if (id && event?.type === 'turn/end') void runPrediction(id, Number(event?.data?.turn ?? 0))
       } catch (error) {
         log.warn('transcript update failed', { error: String(error) })
       }
+    },
+    { global: true } as never,
+  )
+
+  // ── running state, for the composer prediction gate ─────────────────────────
+  // A ghost only makes sense on a stopped session: while the agent streams, the
+  // model route is busy and any guess would be stale by the time it arrived.
+  on(
+    'agent/status',
+    ({ agent, status }: any) => {
+      const id = String(agent?.id ?? '')
+      if (!id) return
+      if (status === 'running') runningSessions.add(id)
+      else runningSessions.delete(id)
     },
     { global: true } as never,
   )
@@ -656,6 +789,41 @@ export function apply(ctx0: Context, config?: unknown): void {
           // req.url may or may not carry the registered prefix; accept both.
           const sub = pathname.startsWith(API) ? pathname.slice(API.length) : pathname
 
+          // POST /predict — composer ghost continuation. Reads the cache filled
+          // at turn end, so this answers in milliseconds and never queues behind
+          // the session's own stream.
+          if (sub === '/predict' && req?.method === 'POST') {
+            const chunks: Buffer[] = []
+            for await (const chunk of req) chunks.push(Buffer.from(chunk))
+            const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as { sessionId?: unknown }
+            const sessionId = String(body?.sessionId ?? '')
+            const sendJson = (status: number, payload: unknown): void => {
+              res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+              res.end(JSON.stringify(payload))
+            }
+            if (!sessionId) return sendJson(400, { ok: false, error: 'sessionId is required' })
+            if (!cfg.predictEnabled) return sendJson(200, { ok: true, enabled: false, running: false, suggestion: '' })
+            // Read the live agent's own status: the event set only sees
+            // transitions that happened after this listener mounted, so a turn
+            // already in flight would read as idle and get a stale guess.
+            const liveAgent = liveAgents.get(sessionId)
+            const running = liveAgent ? liveAgent.status === 'running' : runningSessions.has(sessionId)
+            if (running) {
+              return sendJson(200, { ok: true, enabled: true, running: true, suggestion: '' })
+            }
+            const cached = predictCache.get(sessionId)
+            // A suggestion older than a few minutes describes a moment that has
+            // passed; an empty answer is better than a stale one.
+            const fresh = cached && Date.now() - cached.at < 5 * 60_000
+            return sendJson(200, {
+              ok: true,
+              enabled: true,
+              running: false,
+              suggestion: fresh ? cached.text : '',
+              pending: predicting.has(sessionId),
+            })
+          }
+
           // POST /config — the settings page's write path (see writeConfigValue).
           if (sub === '/config' && req?.method === 'POST') {
             const chunks: Buffer[] = []
@@ -710,6 +878,8 @@ export function apply(ctx0: Context, config?: unknown): void {
                   fallbackAfterErrors: cfg.fallbackAfterErrors,
                   attachIntervalSec: cfg.attachIntervalSec,
                   wakeGuard: cfg.wakeGuard,
+                  predictEnabled: cfg.predictEnabled,
+                  predictChars: cfg.predictChars,
                 },
               }
             } else if (sub === '/models') {
