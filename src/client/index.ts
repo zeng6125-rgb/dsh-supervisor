@@ -1337,8 +1337,7 @@ function ghostMeasure() {
   var rect = node.getBoundingClientRect()
   var style = window.getComputedStyle(node)
   return {
-    left: rect.left,
-    top: rect.top,
+    node: node,
     width: rect.width,
     height: rect.height,
     font: style.font && style.font !== '' ? style.font : style.fontSize + ' ' + style.fontFamily,
@@ -1351,9 +1350,13 @@ function Ghost(props: any) {
   var textState = React.useState('')
   var text = textState[0]
   var setText = textState[1]
-  var boxState = React.useState(undefined)
-  var box = boxState[0]
-  var setBox = boxState[1]
+  var targetState = React.useState(undefined)
+  var target = targetState[0]
+  var setTarget = targetState[1]
+  var nudgeState = React.useState({ dx: 0, dy: 0 })
+  var nudge = nudgeState[0]
+  var setNudge = nudgeState[1]
+  var ghostRef = React.useRef(null)
   var empty = draft.trim().length === 0
 
   React.useEffect(function () {
@@ -1393,11 +1396,26 @@ function Ghost(props: any) {
     }
   }, [empty, props.sessionId, draft])
 
-  // Measure the placeholder while a suggestion stands in for it; it moves with
-  // layout and scroll, and a stale box puts the text in the wrong place.
+  // Where the suggestion should sit: the placeholder's own box. Tracked on
+  // resize/scroll, and aligned against our element's real position rather than
+  // assuming a containing block — `position: fixed` is not viewport-relative
+  // under an ancestor with a transform, which silently parks the text off-screen.
   React.useEffect(function () {
     if (empty && text) {
-      var sync = function (): void { setBox(ghostMeasure()) }
+      var sync = function (): void {
+        var found = ghostMeasure()
+        setTarget(found)
+        var own = ghostRef.current
+        if (found && own) {
+          var ownRect = own.getBoundingClientRect()
+          var targetRect = found.node.getBoundingClientRect()
+          setNudge({ dx: nudge.dx + (targetRect.left - ownRect.left), dy: nudge.dy + (targetRect.top - ownRect.top) })
+          console.debug('[dsh-supervisor] ghost', {
+            target: { left: targetRect.left, top: targetRect.top },
+            own: { left: ownRect.left, top: ownRect.top },
+          })
+        }
+      }
       sync()
       window.addEventListener('resize', sync)
       window.addEventListener('scroll', sync, true)
@@ -1406,11 +1424,12 @@ function Ghost(props: any) {
         window.removeEventListener('scroll', sync, true)
       }
     }
-    setBox(undefined)
+    setTarget(undefined)
+    setNudge({ dx: 0, dy: 0 })
     return
   }, [empty, text])
 
-  var usable = empty && !!text && !!box
+  var usable = empty && !!text && !!target
 
   React.useEffect(function () {
     if (!usable) return
@@ -1436,7 +1455,7 @@ function Ghost(props: any) {
     return function () { document.removeEventListener('keydown', onKeyDown, true) }
   }, [usable, text, props.inputActions])
 
-  if (!usable || !box) return null
+  if (!usable || !target) return null
   return h(
     React.Fragment,
     null,
@@ -1444,16 +1463,18 @@ function Ghost(props: any) {
     h(
       'div',
       {
+        ref: ghostRef,
         className: 'dsv-predict-ghost',
+        'data-ghost': '1',
         'aria-hidden': 'true',
         style: {
-          position: 'fixed',
-          left: box.left + 'px',
-          top: box.top + 'px',
-          width: box.width + 'px',
-          height: box.height + 'px',
-          font: box.font,
-          lineHeight: box.lineHeight,
+          position: 'relative',
+          left: nudge.dx + 'px',
+          top: nudge.dy + 'px',
+          width: target.width + 'px',
+          height: target.height + 'px',
+          font: target.font,
+          lineHeight: target.lineHeight,
           pointerEvents: 'none',
           color: 'var(--dsw-alias-text-tertiary, #9aa0a6)',
           whiteSpace: 'nowrap',
