@@ -1346,18 +1346,27 @@ function ghostMeasure() {
 }
 
 function Ghost(props: any) {
-  var draft = props.useInput(function (state: any) { return typeof state?.draft === 'string' ? state.draft : '' })
+  var useInput = typeof props.useInput === 'function' ? props.useInput : function () { return '' }
+  var draft = useInput(function (state: any) { return typeof state?.draft === 'string' ? state.draft : '' })
   var textState = React.useState('')
   var text = textState[0]
   var setText = textState[1]
   var targetState = React.useState(undefined)
   var target = targetState[0]
   var setTarget = targetState[1]
-  var nudgeState = React.useState({ dx: 0, dy: 0 })
-  var nudge = nudgeState[0]
-  var setNudge = nudgeState[1]
+  var posState = React.useState({ left: 0, top: 0 })
+  var pos = posState[0]
+  var setPos = posState[1]
   var ghostRef = React.useRef(null)
   var empty = draft.trim().length === 0
+
+  React.useEffect(function () {
+    console.debug('[dsh-supervisor] ghost mounted', {
+      hasUseInput: typeof props.useInput === 'function',
+      hasActions: typeof props.inputActions?.setDraft === 'function',
+      hasSession: !!props.sessionId,
+    })
+  }, [])
 
   React.useEffect(function () {
     if (!empty) {
@@ -1380,6 +1389,11 @@ function Ghost(props: any) {
           if (!live) return
           var suggestion = typeof body?.suggestion === 'string' ? body.suggestion.trim() : ''
           setText(suggestion)
+          console.debug('[dsh-supervisor] predict poll', {
+            running: body?.running === true,
+            length: suggestion.length,
+            pending: body?.pending === true,
+          })
           // A running session may go idle any moment, and an accepted suggestion
           // expires: recheck while it is running or while nothing was found.
           if (body?.running === true || suggestion === '') {
@@ -1406,15 +1420,22 @@ function Ghost(props: any) {
         var found = ghostMeasure()
         setTarget(found)
         var own = ghostRef.current
-        if (found && own) {
-          var ownRect = own.getBoundingClientRect()
-          var targetRect = found.node.getBoundingClientRect()
-          setNudge({ dx: nudge.dx + (targetRect.left - ownRect.left), dy: nudge.dy + (targetRect.top - ownRect.top) })
-          console.debug('[dsh-supervisor] ghost', {
-            target: { left: targetRect.left, top: targetRect.top },
-            own: { left: ownRect.left, top: ownRect.top },
-          })
-        }
+        if (!found || !own) return
+        // Absolute coordinates must be measured against this element's OWN
+        // containing block, not its flow position: overlay entries sit in a
+        // wrapper that is not the card origin, which is what put the text off.
+        var host = own.offsetParent || own.parentElement
+        if (!host) return
+        var hostRect = host.getBoundingClientRect()
+        var targetRect = found.node.getBoundingClientRect()
+        setPos({
+          left: targetRect.left - hostRect.left + host.scrollLeft,
+          top: targetRect.top - hostRect.top + host.scrollTop,
+        })
+        console.debug('[dsh-supervisor] ghost', {
+          left: targetRect.left - hostRect.left,
+          top: targetRect.top - hostRect.top,
+        })
       }
       sync()
       window.addEventListener('resize', sync)
@@ -1425,7 +1446,7 @@ function Ghost(props: any) {
       }
     }
     setTarget(undefined)
-    setNudge({ dx: 0, dy: 0 })
+    setPos({ left: 0, top: 0 })
     return
   }, [empty, text])
 
@@ -1455,6 +1476,25 @@ function Ghost(props: any) {
     return function () { document.removeEventListener('keydown', onKeyDown, true) }
   }, [usable, text, props.inputActions])
 
+  // A suggestion with nowhere to sit still has to be visible: silence here is
+  // indistinguishable from "the feature does nothing", which is exactly how this
+  // went undiagnosed. The fallback states why it is not aligned.
+  if (empty && text && !target) {
+    return h(
+      'div',
+      {
+        'data-ghost-fallback': '1',
+        style: {
+          position: 'relative',
+          color: 'var(--dsw-alias-text-tertiary, #9aa0a6)',
+          fontSize: '12px',
+          pointerEvents: 'none',
+          padding: '2px 8px',
+        },
+      },
+      text,
+    )
+  }
   if (!usable || !target) return null
   return h(
     React.Fragment,
@@ -1468,9 +1508,9 @@ function Ghost(props: any) {
         'data-ghost': '1',
         'aria-hidden': 'true',
         style: {
-          position: 'relative',
-          left: nudge.dx + 'px',
-          top: nudge.dy + 'px',
+          position: 'absolute',
+          left: pos.left + 'px',
+          top: pos.top + 'px',
           width: target.width + 'px',
           height: target.height + 'px',
           font: target.font,

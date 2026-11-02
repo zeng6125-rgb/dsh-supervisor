@@ -233,6 +233,8 @@ export function apply(ctx0: Context, config?: unknown): void {
   const predictStats = { ok: 0, failed: 0, skipped: 0, lastError: '' }
   /** Route most recently seen on a real model call, as a fallback source. */
   let lastSeenRoute: { provider: string; model: string } | undefined
+  /** The agent's last reply per session: what it just said drives the guess. */
+  const lastReply = new Map<string, string>()
   /** Live agents by session id: the goal service and the wake both need the
    *  real instance, not an id (`goals.get` rejects anything else). */
   const liveAgents = new Map<string, any>()
@@ -288,11 +290,12 @@ export function apply(ctx0: Context, config?: unknown): void {
     predicting.add(sessionId)
     try {
       const system = [
-        'You predict what the user will type next in a chat with a coding agent.',
-        'Output ONE short line: at most ' + cfg.predictChars + ' characters, in the same language as the recent messages.',
-        "It continues the user's next message - a request, a question or a reply, phrased as the user would type it.",
-        'No quotes, no explanation, no markdown.',
-        'If nothing sensible can be predicted, output nothing at all.',
+        "You predict the user's next message to a coding agent, using the turn that just finished.",
+        'Output ONE short line, at most ' + cfg.predictChars + ' characters, in the language the user writes in.',
+        'Predict a concrete next instruction the user is likely to type: a next step the agent left open, a fix for what it just reported, or a short acknowledgement that moves the work forward.',
+        'Do not summarise the turn, do not answer the user, do not restate what the agent said, do not ask a question back.',
+        'No quotes, no explanation, no markdown, no trailing ellipsis.',
+        'If the turn offers nothing concrete to continue, output nothing at all.',
       ].join(' ')
       let out = ''
       const ask = (withOffEffort: boolean): AsyncIterable<any> =>
@@ -305,8 +308,9 @@ export function apply(ctx0: Context, config?: unknown): void {
               {
                 type: 'text',
                 text:
-                  `Recent user messages (oldest first):\n${recent.map((t, i) => `[${i + 1}] ${t}`).join('\n')}\n\n` +
-                  "Predict the user's next message.",
+                  `USER (recent, oldest first):\n${recent.map((t) => '- ' + t).join('\n')}\n\n` +
+                  `AGENT (its last reply):\n${lastReply.get(sessionId) ?? '(none)'}\n\n` +
+                  "Predict the user's next short message.",
               },
             ],
             source: { kind: 'user' },
@@ -574,6 +578,17 @@ export function apply(ctx0: Context, config?: unknown): void {
         }
         // A finished turn is the one moment worth predicting from: the route is
         // free, the answer is just read, and the user is about to type.
+        if (id && event?.type === 'assistant/message') {
+          // What the agent just said is the strongest signal for what the user
+          // types next, so it is kept verbatim (truncated) until the turn ends.
+          const parts = Array.isArray(event?.data?.message?.content) ? event.data.message.content : []
+          const said = parts
+            .filter((part: any) => part && part.type === 'text' && typeof part.text === 'string')
+            .map((part: any) => part.text)
+            .join(' ')
+            .trim()
+          if (said) lastReply.set(id, said.slice(0, 600))
+        }
         if (id && event?.type === 'turn/end') void runPrediction(id, Number(event?.data?.turn ?? 0))
       } catch (error) {
         log.warn('transcript update failed', { error: String(error) })
