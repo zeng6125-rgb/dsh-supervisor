@@ -1329,7 +1329,10 @@ var GHOST_PLACEHOLDER = '[data-composer-placeholder]'
 var GHOST_RECHECK_MS = 2500
 
 function ghostMeasure() {
-  var node = document.querySelector(GHOST_PLACEHOLDER)
+  // Prefer the shipped placeholder: it is the element already laid out as "the
+  // line of grey text in here". Fall back to the editor box when a session runs
+  // without one (a hint is showing), so a prediction is never silently dropped.
+  var node = document.querySelector(GHOST_PLACEHOLDER) || document.querySelector('[contenteditable="true"]')
   if (!node) return undefined
   var rect = node.getBoundingClientRect()
   var style = window.getComputedStyle(node)

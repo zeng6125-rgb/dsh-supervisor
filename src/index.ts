@@ -224,6 +224,15 @@ export function apply(ctx0: Context, config?: unknown): void {
   const predictCache = new Map<string, { text: string; turn: number; at: number }>()
   /** Sessions with a prediction in flight, so one turn cannot start two. */
   const predicting = new Set<string>()
+  /**
+   * Prediction health, surfaced in `/state`. Without it a failed prediction is
+   * invisible: `ctx.logger` does not reach disk in this build, so an empty
+   * composer looks identical whether the feature is off, broken, or decided
+   * there was nothing to say.
+   */
+  const predictStats = { ok: 0, failed: 0, skipped: 0, lastError: '' }
+  /** Route most recently seen on a real model call, as a fallback source. */
+  let lastSeenRoute: { provider: string; model: string } | undefined
   /** Live agents by session id: the goal service and the wake both need the
    *  real instance, not an id (`goals.get` rejects anything else). */
   const liveAgents = new Map<string, any>()
@@ -253,7 +262,8 @@ export function apply(ctx0: Context, config?: unknown): void {
       return { provider: cfg.reviewProvider, model: cfg.reviewModel }
     }
     const route = routes.get(sessionId)
-    return route ? { provider: route.provider, model: route.model } : undefined
+    if (route) return { provider: route.provider, model: route.model }
+    return lastSeenRoute
   }
 
   /**
@@ -264,9 +274,17 @@ export function apply(ctx0: Context, config?: unknown): void {
     if (!cfg.predictEnabled) return
     if (predicting.has(sessionId)) return
     const recent = (predictRing.get(sessionId) ?? []).slice(-4)
-    if (recent.length === 0) return
+    if (recent.length === 0) {
+      predictStats.skipped += 1
+      predictStats.lastError = 'no recent user messages'
+      return
+    }
     const route = predictRouteFor(sessionId)
-    if (!route) return
+    if (!route) {
+      predictStats.skipped += 1
+      predictStats.lastError = 'no route for this session'
+      return
+    }
     predicting.add(sessionId)
     try {
       const system = [
@@ -277,7 +295,8 @@ export function apply(ctx0: Context, config?: unknown): void {
         'If nothing sensible can be predicted, output nothing at all.',
       ].join(' ')
       let out = ''
-      const stream = (llm as never as { stream(options: unknown): AsyncIterable<any> }).stream({
+      const ask = (withOffEffort: boolean): AsyncIterable<any> =>
+        (llm as never as { stream(options: unknown): AsyncIterable<any> }).stream({
         provider: route.provider,
         model: route.model,
         messages: [
@@ -294,12 +313,21 @@ export function apply(ctx0: Context, config?: unknown): void {
           }),
         ],
         system,
-        temperature: 0.6,
-        maxTokens: 96,
-        reasoningEffort: ReasoningEffortId('off'),
-      } as never)
-      for await (const chunk of stream) {
-        if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') out += chunk.text
+          temperature: 0.6,
+          maxTokens: 96,
+          ...(withOffEffort ? { reasoningEffort: ReasoningEffortId('off') } : {}),
+        } as never)
+      try {
+        for await (const chunk of ask(true)) {
+          if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') out += chunk.text
+        }
+      } catch {
+        // Some adapters reject an explicit effort id: one retry without it is
+        // cheaper than losing every prediction on that route.
+        out = ''
+        for await (const chunk of ask(false)) {
+          if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') out += chunk.text
+        }
       }
       const line =
         out
@@ -307,8 +335,15 @@ export function apply(ctx0: Context, config?: unknown): void {
           .map((part) => part.trim())
           .find((part) => part.length > 0) ?? ''
       const text = line.replace(/^["'“”「」]|["'“”「」]$/g, '').slice(0, cfg.predictChars)
-      if (text) predictCache.set(sessionId, { text, turn, at: Date.now() })
+      if (text) {
+        predictCache.set(sessionId, { text, turn, at: Date.now() })
+        predictStats.ok += 1
+      } else {
+        predictStats.skipped += 1
+      }
     } catch (error) {
+      predictStats.failed += 1
+      predictStats.lastError = String(error).slice(0, 300)
       log.debug('prediction failed', { error: String(error) })
     } finally {
       predicting.delete(sessionId)
@@ -543,6 +578,20 @@ export function apply(ctx0: Context, config?: unknown): void {
       } catch (error) {
         log.warn('transcript update failed', { error: String(error) })
       }
+    },
+    { global: true } as never,
+  )
+
+  // A real call names the route it ran on. This is the fallback when a session's
+  // route has not been captured from `agent/request` yet (the first turn after a
+  // mount ends before that capture is guaranteed).
+  on(
+    'llm/stream',
+    (options: any, next: () => any) => {
+      if (options?.provider && options?.model) {
+        lastSeenRoute = { provider: options.provider, model: options.model }
+      }
+      return next()
     },
     { global: true } as never,
   )
@@ -853,6 +902,7 @@ export function apply(ctx0: Context, config?: unknown): void {
                 intercept: cfg.intercept,
                 stepsBetweenReviews: cfg.stepsBetweenReviews,
                 totals: state.totals(),
+                predict: { ...predictStats },
                 ...state.snapshot(),
               }
             } else if (sub === '/config') {
