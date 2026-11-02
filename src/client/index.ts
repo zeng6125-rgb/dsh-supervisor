@@ -1322,27 +1322,26 @@ function installSettingsNavIcon(): () => void {
 // replaced by a short grey guess at what the user will type next; Tab accepts
 // it. The running check lives on the host (`/predict` answers it first), because
 // only the host knows whether the agent is mid-stream.
+//
+// The prediction is painted by a generated CSS rule on the placeholder's OWN
+// box (`::after`), not by an element of ours: inheriting that box removes every
+// coordinate calculation, and with it the offset bugs that came from guessing a
+// containing block.
 var GHOST_LIVE_CLASS = 'dsv-predict-live'
-/** The shipped placeholder is a real element carrying this attribute. */
 var GHOST_PLACEHOLDER = '[data-composer-placeholder]'
-/** Recheck cadence while the session is running or the box stays empty. */
+/** Recheck cadence: fast while nothing is shown, slow once something is. */
 var GHOST_RECHECK_MS = 2500
+var GHOST_REVALIDATE_MS = 8000
 
-function ghostMeasure() {
-  // Prefer the shipped placeholder: it is the element already laid out as "the
-  // line of grey text in here". Fall back to the editor box when a session runs
-  // without one (a hint is showing), so a prediction is never silently dropped.
-  var node = document.querySelector(GHOST_PLACEHOLDER) || document.querySelector('[contenteditable="true"]')
-  if (!node) return undefined
-  var rect = node.getBoundingClientRect()
-  var style = window.getComputedStyle(node)
-  return {
-    node: node,
-    width: rect.width,
-    height: rect.height,
-    font: style.font && style.font !== '' ? style.font : style.fontSize + ' ' + style.fontFamily,
-    lineHeight: style.lineHeight,
-  }
+function ghostCss(text: string): string {
+  var live = 'body.' + GHOST_LIVE_CLASS
+  // The placeholder paints its own text; hide exactly that, then paint ours in
+  // the same box so typography and alignment come from the host, not from us.
+  return (
+    live + ' ' + GHOST_PLACEHOLDER + '{visibility:hidden}' +
+    live + ' ' + GHOST_PLACEHOLDER + '::after{content:' + JSON.stringify(text) +
+    ';visibility:visible;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
+  )
 }
 
 function Ghost(props: any) {
@@ -1351,22 +1350,7 @@ function Ghost(props: any) {
   var textState = React.useState('')
   var text = textState[0]
   var setText = textState[1]
-  var targetState = React.useState(undefined)
-  var target = targetState[0]
-  var setTarget = targetState[1]
-  var posState = React.useState({ left: 0, top: 0 })
-  var pos = posState[0]
-  var setPos = posState[1]
-  var ghostRef = React.useRef(null)
   var empty = draft.trim().length === 0
-
-  React.useEffect(function () {
-    console.debug('[dsh-supervisor] ghost mounted', {
-      hasUseInput: typeof props.useInput === 'function',
-      hasActions: typeof props.inputActions?.setDraft === 'function',
-      hasSession: !!props.sessionId,
-    })
-  }, [])
 
   React.useEffect(function () {
     if (!empty) {
@@ -1387,20 +1371,19 @@ function Ghost(props: any) {
         .then(function (response) { return response.json() })
         .then(function (body: any) {
           if (!live) return
-          var suggestion = typeof body?.suggestion === 'string' ? body.suggestion.trim() : ''
+          // `enabled: false` means the toggle is off: drop what is on screen
+          // instead of leaving a suggestion the user already turned off.
+          var suggestion = body?.enabled === false ? '' : typeof body?.suggestion === 'string' ? body.suggestion.trim() : ''
           setText(suggestion)
-          console.debug('[dsh-supervisor] predict poll', {
-            running: body?.running === true,
-            length: suggestion.length,
-            pending: body?.pending === true,
-          })
-          // A running session may go idle any moment, and an accepted suggestion
-          // expires: recheck while it is running or while nothing was found.
           if (body?.running === true || suggestion === '') {
             timer = window.setTimeout(ask, GHOST_RECHECK_MS)
+          } else {
+            // Revalidate even while a suggestion stands: the setting can be
+            // switched off (or the session start running) at any moment.
+            timer = window.setTimeout(ask, GHOST_REVALIDATE_MS)
           }
         })
-        .catch(function () { /* aborted or offline */ })
+        .catch(function () { /* aborted, offline */ })
     }
     ask()
     return function () {
@@ -1410,47 +1393,7 @@ function Ghost(props: any) {
     }
   }, [empty, props.sessionId, draft])
 
-  // Where the suggestion should sit: the placeholder's own box. Tracked on
-  // resize/scroll, and aligned against our element's real position rather than
-  // assuming a containing block — `position: fixed` is not viewport-relative
-  // under an ancestor with a transform, which silently parks the text off-screen.
-  React.useEffect(function () {
-    if (empty && text) {
-      var sync = function (): void {
-        var found = ghostMeasure()
-        setTarget(found)
-        var own = ghostRef.current
-        if (!found || !own) return
-        // Absolute coordinates must be measured against this element's OWN
-        // containing block, not its flow position: overlay entries sit in a
-        // wrapper that is not the card origin, which is what put the text off.
-        var host = own.offsetParent || own.parentElement
-        if (!host) return
-        var hostRect = host.getBoundingClientRect()
-        var targetRect = found.node.getBoundingClientRect()
-        setPos({
-          left: targetRect.left - hostRect.left + host.scrollLeft,
-          top: targetRect.top - hostRect.top + host.scrollTop,
-        })
-        console.debug('[dsh-supervisor] ghost', {
-          left: targetRect.left - hostRect.left,
-          top: targetRect.top - hostRect.top,
-        })
-      }
-      sync()
-      window.addEventListener('resize', sync)
-      window.addEventListener('scroll', sync, true)
-      return function () {
-        window.removeEventListener('resize', sync)
-        window.removeEventListener('scroll', sync, true)
-      }
-    }
-    setTarget(undefined)
-    setPos({ left: 0, top: 0 })
-    return
-  }, [empty, text])
-
-  var usable = empty && !!text && !!target
+  var usable = empty && !!text
 
   React.useEffect(function () {
     if (!usable) return
@@ -1476,57 +1419,10 @@ function Ghost(props: any) {
     return function () { document.removeEventListener('keydown', onKeyDown, true) }
   }, [usable, text, props.inputActions])
 
-  // A suggestion with nowhere to sit still has to be visible: silence here is
-  // indistinguishable from "the feature does nothing", which is exactly how this
-  // went undiagnosed. The fallback states why it is not aligned.
-  if (empty && text && !target) {
-    return h(
-      'div',
-      {
-        'data-ghost-fallback': '1',
-        style: {
-          position: 'relative',
-          color: 'var(--dsw-alias-text-tertiary, #9aa0a6)',
-          fontSize: '12px',
-          pointerEvents: 'none',
-          padding: '2px 8px',
-        },
-      },
-      text,
-    )
-  }
-  if (!usable || !target) return null
-  return h(
-    React.Fragment,
-    null,
-    h('style', null, 'body.' + GHOST_LIVE_CLASS + ' ' + GHOST_PLACEHOLDER + '{visibility:hidden !important}'),
-    h(
-      'div',
-      {
-        ref: ghostRef,
-        className: 'dsv-predict-ghost',
-        'data-ghost': '1',
-        'aria-hidden': 'true',
-        style: {
-          position: 'absolute',
-          left: pos.left + 'px',
-          top: pos.top + 'px',
-          width: target.width + 'px',
-          height: target.height + 'px',
-          font: target.font,
-          lineHeight: target.lineHeight,
-          pointerEvents: 'none',
-          color: 'var(--dsw-alias-text-tertiary, #9aa0a6)',
-          whiteSpace: 'nowrap',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          zIndex: 2,
-        },
-      },
-      text,
-    ),
-  )
+  if (!usable) return null
+  return h('style', null, ghostCss(text))
 }
+
 
 function registerAll(ctx: any): () => void {
   var slots = ctx.slots
