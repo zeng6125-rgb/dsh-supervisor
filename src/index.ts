@@ -17,7 +17,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { boundContextSummary, createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 
 import { Config, resolveConfig } from './config.js'
-import { SupervisorDelivery } from './delivery.js'
+import { shouldAttach, SupervisorDelivery } from './delivery.js'
 import { REVIEWER_CLAIM_KEY, SUPERVISOR_PLUGIN_ID, SUPERVISOR_SOURCE_KIND, type SupervisorNote } from './kinds.js'
 import { SUPERVISOR_SYSTEM_PROMPT } from './prompts.js'
 import { Reviewer, type ReviewerRoute } from './review.js'
@@ -95,6 +95,7 @@ function signature(cfg: Config): string {
     cfg.wakeGuard,
     cfg.predictEnabled,
     cfg.predictChars,
+    cfg.attachSeverity,
   ].join('\u0000')
 }
 
@@ -119,6 +120,7 @@ const CONFIG_VALUE_KINDS: Record<string, 'boolean' | 'number' | 'string' | 'rout
   wakeGuard: 'boolean',
   predictEnabled: 'boolean',
   predictChars: 'number',
+  attachSeverity: 'string',
 }
 
 /** Route keys a combined picker writes, and the config fields they map to. */
@@ -444,6 +446,16 @@ export function apply(ctx0: Context, config?: unknown): void {
       },
       getObjective: () => objectiveOf(sessionId),
       onNote: (note: SupervisorNote, category?: string) => {
+        state.recordNoteCategory(sessionId, category)
+        state.recordNoteSeverity(sessionId, note.severity)
+        // Not every note earns the agent's attention. A concern is worth a line
+        // on the panel; only a blocker is worth interrupting the work in flight.
+        if (!shouldAttach(note.severity, cfg.attachSeverity)) {
+          state.recordAlert(sessionId, note, 'panel', category)
+          syncPending(sessionId)
+          log.debug('note parked on the panel', { sessionId, severity: note.severity, category })
+          return
+        }
         // The note waits (see SupervisorDelivery) for a step the agent is
         // already entering: no inbox turn of its own, no held step.
         const channel = delivery.raise(sessionId, note)
@@ -452,7 +464,6 @@ export function apply(ctx0: Context, config?: unknown): void {
         // Only "you stopped with work left" earns a push, and only while the
         // agent is still busy: if it goes idle, the status listener below
         // speaks; if it keeps working, the note rides a step as usual.
-        state.recordNoteCategory(sessionId, category)
         if (category === WAKE_CATEGORY && cfg.wakeGuard) {
           awakePending.set(sessionId, note)
           pendingCategory.set(sessionId, category)
@@ -959,6 +970,7 @@ export function apply(ctx0: Context, config?: unknown): void {
                   wakeGuard: cfg.wakeGuard,
                   predictEnabled: cfg.predictEnabled,
                   predictChars: cfg.predictChars,
+                  attachSeverity: cfg.attachSeverity,
                 },
               }
             } else if (sub === '/models') {

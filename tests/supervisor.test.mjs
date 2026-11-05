@@ -10,7 +10,7 @@ import { test } from 'node:test'
 import { EmissionGuard } from '../lib/guard.js'
 import { SessionTranscript } from '../lib/transcript.js'
 import { Reviewer } from '../lib/review.js'
-import { SupervisorDelivery } from '../lib/delivery.js'
+import { SupervisorDelivery, shouldAttach } from '../lib/delivery.js'
 import { Config as ConfigSchema, resolveConfig } from '../lib/config.js'
 import { SupervisorState } from '../lib/state.js'
 import { SUPERVISOR_SYSTEM_PROMPT, PROBLEM_CATEGORIES } from '../lib/prompts.js'
@@ -91,6 +91,7 @@ test('resolveConfig unwraps volatile references', () => {
     wakeGuard: volatile(false),
     predictEnabled: volatile(false),
     predictChars: volatile(80),
+    attachSeverity: volatile('off'),
   })
   assert.deepEqual(cfg, {
     enabled: false,
@@ -108,6 +109,7 @@ test('resolveConfig unwraps volatile references', () => {
     wakeGuard: false,
     predictEnabled: false,
     predictChars: 80,
+    attachSeverity: 'off',
   })
 })
 
@@ -122,7 +124,7 @@ test('the exported schema declares every field volatile', () => {
   // The settings service skips namespaces with no volatile field, so losing one
   // silently removes the row's configure form from the Plugins page.
   // An object schema keeps its fields under `dict`, each already a Schema.
-  const fields = ['enabled', 'stepsBetweenReviews', 'intercept', 'maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens', 'fallbackProvider', 'fallbackModel', 'fallbackAfterErrors', 'reviewProvider', 'reviewModel', 'attachIntervalSec', 'wakeGuard', 'predictEnabled', 'predictChars']
+  const fields = ['enabled', 'stepsBetweenReviews', 'intercept', 'maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens', 'fallbackProvider', 'fallbackModel', 'fallbackAfterErrors', 'reviewProvider', 'reviewModel', 'attachIntervalSec', 'wakeGuard', 'predictEnabled', 'predictChars', 'attachSeverity']
   for (const field of fields) {
     assert.equal(ConfigSchema.dict[field].meta.volatile, true, `${field} is not volatile`)
   }
@@ -1121,6 +1123,37 @@ test('six steps produce one queued note that rides the next turn', async () => {
     ['u7', '[supervisor:concern] you are asserting the config key exists without reading it'],
   )
   assert.equal(d.hasPending(sid), false)
+})
+
+// ── attach policy ────────────────────────────────────────────────────────────
+
+test('only a blocker interrupts by default; a concern stays on the panel', () => {
+  // Measured: with everything attached, over half of all reviews produced a
+  // note, which on a long turn is several interruptions and reads as the agent
+  // losing its thread.
+  assert.equal(shouldAttach('blocker', 'blocker'), true)
+  assert.equal(shouldAttach('concern', 'blocker'), false)
+})
+
+test('the off mode never lets a note into the conversation', () => {
+  assert.equal(shouldAttach('blocker', 'off'), false)
+  assert.equal(shouldAttach('concern', 'off'), false)
+})
+
+test('the all mode restores the old behaviour, and an unknown mode is conservative', () => {
+  assert.equal(shouldAttach('concern', 'all'), true)
+  assert.equal(shouldAttach('blocker', 'all'), true)
+  // A typo must not silently become "interrupt for everything".
+  assert.equal(shouldAttach('concern', 'bogus'), false)
+  assert.equal(shouldAttach('blocker', 'bogus'), true)
+})
+
+test('the default attach mode is blocker', () => {
+  assert.equal(resolveConfig({}).attachSeverity, 'blocker')
+  assert.equal(resolveConfig({ attachSeverity: 'off' }).attachSeverity, 'off')
+  assert.equal(resolveConfig({ attachSeverity: 'all' }).attachSeverity, 'all')
+  // Anything outside the closed set falls back rather than reaching delivery.
+  assert.equal(resolveConfig({ attachSeverity: 'nonsense' }).attachSeverity, 'blocker')
 })
 
 // ── wake decision ────────────────────────────────────────────────────────────

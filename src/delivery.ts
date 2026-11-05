@@ -31,6 +31,20 @@ export interface DeliveryOptions {
   logger?: { debug?(...args: unknown[]): void; warn?(...args: unknown[]): void }
 }
 
+/**
+ * Whether a note may speak into the agent's conversation at all.
+ *
+ * Measured: with `all`, more than half of every review produced a note, which on
+ * a long turn is several interruptions and reads as the agent losing its thread.
+ * `blocker` keeps only the notes that say continuing wastes work; `off` turns the
+ * reviewer into a pure observer that writes to the panel and nowhere else.
+ */
+export function shouldAttach(severity: string, mode: string): boolean {
+  if (mode === 'off') return false
+  if (mode === 'all') return true
+  return severity === 'blocker'
+}
+
 /** Text the agent sees; the prefix is its only cue that this is advice. */
 export function renderNoteText(note: SupervisorNote): string {
   return `[supervisor:${note.severity}] ${note.note}`

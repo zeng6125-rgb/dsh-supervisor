@@ -792,6 +792,8 @@ interface FieldSpec {
   toggle?: boolean
   text?: boolean
   select?: 'route'
+  /** Fixed choices rendered as a native dropdown (see `select: 'route'` for routes). */
+  options?: readonly string[]
   ph?: string
   min?: number
   max?: number
@@ -808,6 +810,7 @@ var FIELDS: FieldSpec[] = [
   { key: 'attachIntervalSec', label: '附加限流（秒）', hint: '同一会话两次附加提醒之间的最小间隔：活跃会话不会每轮都被插话。冷却期间攒下的旧提醒只上面板，到点附加最新一条。0 = 关闭限流。', min: 0, max: 3600 },
   { key: 'predictEnabled', label: '输入框续写建议', hint: '会话空闲且输入框为空时，用一条灰色短句替换官方 placeholder，预测你接下来想说什么；Tab 接受，Esc 或继续打字丢弃。运行中的会话不显示。', toggle: true },
   { key: 'predictChars', label: '续写长度上限（字）', hint: '建议的最长字数。越长越容易变成噪音。', min: 10, max: 200 },
+  { key: 'attachSeverity', label: '谁能插话', hint: 'off = 全部只进面板，一句都不进对话（纯观察）；blocker = 只有「继续下去会白干」的才插话；all = 任何提醒都搭下一步。实测 all 档下超过一半的审查都会出声，长轮次里会连续打断。', options: ['off', 'blocker', 'all'] },
   { key: 'wakeGuard', label: '停滞即唤醒', hint: '审查判定「还有活没干完就停」且 agent 已空闲时，把它推回工作；与附加限流共用冷却窗口，不会连环唤醒。它只补一句提醒，不替 agent 做决定。', toggle: true },
   { key: 'fallbackRoute', label: '回退路由', hint: '审查路由连续失败后切到这条路由；留空则不启用回退，连续失败时面板会亮失明提醒。', select: 'route', ph: '不启用' },
   { key: 'fallbackAfterErrors', label: '回退触发（连败次数）', hint: '连续多少次 transient 失败后切回退路由。', min: 1, max: 20 },
@@ -971,6 +974,20 @@ function ConfigCard(props: CardProps) {
             disabled: !writable || busy,
             onClick: function () { edit(f.key, !current(f.key)) },
           })
+        } else if (f.options) {
+          // A closed set: a mistyped free-text mode would silently fall back to
+          // the default, so the choice is a dropdown instead.
+          control = h(
+            'select',
+            {
+              className: 'dsv-select',
+              value: String(current(f.key) ?? ''),
+              'aria-label': f.label,
+              disabled: !writable || busy,
+              onChange: function (e: any) { edit(f.key, e.target.value) },
+            },
+            f.options.map(function (opt) { return h('option', { value: opt, key: opt }, opt) }),
+          )
         } else if (f.select === 'route') {
           // One picker per route: value is `provider\u0000model` (either side may
           // be empty while the other is set). Options are `provider · model`,

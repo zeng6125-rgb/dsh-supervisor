@@ -41,6 +41,15 @@ export interface Config {
    */
   wakeGuard: boolean
   /**
+   * Which notes may speak into the conversation.
+   *   off     — none; every note is panel-only (a pure observer)
+   *   blocker — only a note that says continuing wastes work
+   *   all     — any note rides the agent's next step
+   * Measured: with `all`, more than half of all reviews produced a note, which
+   * is 2-5 interruptions per long turn and what made the agent lose its thread.
+   */
+  attachSeverity: string
+  /**
    * Composer ghost continuation: when a session is idle and its input box is
    * empty, show a short grey guess at what the user will type. Tab accepts it.
    */
@@ -69,6 +78,7 @@ export const Config = z.object({
   reviewModel: z.string().default('').volatile(),
   attachIntervalSec: z.number().min(0).max(3600).default(180).volatile(),
   wakeGuard: z.boolean().default(true).volatile(),
+  attachSeverity: z.string().default('blocker').volatile(),
   predictEnabled: z.boolean().default(true).volatile(),
   predictChars: z.number().min(10).max(200).default(40).volatile(),
 })
@@ -98,6 +108,9 @@ const DEFAULTS: Required<Config> = {
   // On by default: the whole point is that a stopped-but-unfinished session
   // gets pushed once, and the cooldown above bounds how often that can happen.
   wakeGuard: true,
+  // Only blockers interrupt by default: a note is worth an agent's attention
+  // only when ignoring it plainly wastes the work in flight.
+  attachSeverity: 'blocker',
   // Only a stopped session gets a ghost: while it runs, the route is busy and
   // a guess would be stale before it arrived.
   predictEnabled: true,
@@ -123,6 +136,13 @@ function num(value: unknown, fallback: number, min: number): number {
   const parsed = typeof raw === 'number' && Number.isFinite(raw) ? raw : Number(raw)
   if (!Number.isFinite(parsed)) return fallback
   return Math.max(min, Math.floor(parsed))
+}
+
+/** One of the three attach modes; anything else falls back to the default. */
+function mode(value: unknown, fallback: string): string {
+  const raw = unwrap(value)
+  const text = typeof raw === 'string' ? raw.trim() : ''
+  return text === 'off' || text === 'blocker' || text === 'all' ? text : fallback
 }
 
 function bool(value: unknown, fallback: boolean): boolean {
@@ -156,6 +176,7 @@ export function resolveConfig(raw: unknown): Required<Config> {
     reviewModel: str(source.reviewModel, DEFAULTS.reviewModel),
     attachIntervalSec: num(source.attachIntervalSec, DEFAULTS.attachIntervalSec, 0),
     wakeGuard: bool(source.wakeGuard, DEFAULTS.wakeGuard),
+    attachSeverity: mode(source.attachSeverity, DEFAULTS.attachSeverity),
     predictEnabled: bool(source.predictEnabled, DEFAULTS.predictEnabled),
     predictChars: num(source.predictChars, DEFAULTS.predictChars, 10),
   }

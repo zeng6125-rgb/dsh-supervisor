@@ -55,6 +55,12 @@ export interface SupervisorSessionState {
    * In-memory only: pre-existing history has no category to backfill.
    */
   readonly noteCategories?: Readonly<Record<string, number>>
+  /**
+   * Notes by severity. The intrusiveness that matters is how often a `concern`
+   * — a note nobody asked to interrupt for — reached the agent, and this is the
+   * denominator for that.
+   */
+  readonly noteSeverities?: Readonly<Record<string, number>>
 }
 
 /** Outcomes that mean the reviewer is not doing its job; surfaced as a warning. */
@@ -117,6 +123,16 @@ export class SupervisorState {
    * field, which is counted rather than hidden: that rate decides whether the
    * wake guard can ever fire.
    */
+  /** One note's severity, so the blocker/concern split is measurable. */
+  recordNoteSeverity(sessionId: string, severity: string): void {
+    const current = this.sessions.get(sessionId)
+    if (!current) return
+    const next = { ...(current.noteSeverities ?? {}) }
+    next[severity] = (next[severity] ?? 0) + 1
+    this.setSession(sessionId, { noteSeverities: next })
+    this.scheduleFlush()
+  }
+
   recordNoteCategory(sessionId: string, category: string | undefined): void {
     const current = this.sessions.get(sessionId)
     if (!current) return
@@ -271,12 +287,14 @@ export class SupervisorState {
     errorKinds: Record<string, number>
     /** Notes by reported category; `unreported` counts notes that omitted it. */
     noteCategories: Record<string, number>
+    noteSeverities: Record<string, number>
   } {
     const outcomes: Record<string, number> = {}
     const parseFails: Record<string, number> = {}
     const parseFailsByRoute: Record<string, Record<string, number>> = {}
     const errorKinds: Record<string, number> = {}
     const noteCategories: Record<string, number> = {}
+    const noteSeverities: Record<string, number> = {}
     let steps = 0
     let reviews = 0
     for (const session of this.all()) {
@@ -297,6 +315,9 @@ export class SupervisorState {
       for (const [category, count] of Object.entries(session.noteCategories ?? {})) {
         noteCategories[category] = (noteCategories[category] ?? 0) + count
       }
+      for (const [severity, count] of Object.entries(session.noteSeverities ?? {})) {
+        noteSeverities[severity] = (noteSeverities[severity] ?? 0) + count
+      }
     }
     const unhealthy = UNHEALTHY_OUTCOMES.reduce((sum, outcome) => sum + (outcomes[outcome] ?? 0), 0)
     return {
@@ -310,6 +331,7 @@ export class SupervisorState {
       parseFailsByRoute,
       errorKinds,
       noteCategories,
+      noteSeverities,
     }
   }
 
