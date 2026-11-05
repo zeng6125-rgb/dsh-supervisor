@@ -231,6 +231,12 @@ export function apply(ctx0: Context, config?: unknown): void {
    * there was nothing to say.
    */
   const predictStats = { ok: 0, failed: 0, skipped: 0, lastError: '' }
+  /**
+   * What the reviewer's own calls cost, including cache behaviour. This is the
+   * number that was invisible: a review prompt whose prefix changes every call
+   * pays full price every time, and nothing in the note ledger showed it.
+   */
+  const reviewUsage = { calls: 0, input: 0, read: 0, write: 0, output: 0 }
   /** Route most recently seen on a real model call, as a fallback source. */
   let lastSeenRoute: { provider: string; model: string } | undefined
   /** The agent's last reply per session: what it just said drives the guess. */
@@ -458,6 +464,13 @@ export function apply(ctx0: Context, config?: unknown): void {
       },
       // Count finished reviews, not initiations, and record *how* each ended —
       // otherwise `reviews: 5` cannot be told apart from five silent failures.
+      onUsage: (usage) => {
+        reviewUsage.calls += 1
+        reviewUsage.input += usage.inputTokens ?? 0
+        reviewUsage.read += usage.cacheReadTokens ?? 0
+        reviewUsage.write += usage.cacheWriteTokens ?? 0
+        reviewUsage.output += usage.outputTokens ?? 0
+      },
       onOutcome: (outcome, reply, reason, failure) => {
         state.recordReview(sessionId, outcome, reply, reason, failure)
         if (outcome !== 'silent' && outcome !== 'note' && outcome !== 'suppressed') {
@@ -918,6 +931,7 @@ export function apply(ctx0: Context, config?: unknown): void {
                 stepsBetweenReviews: cfg.stepsBetweenReviews,
                 totals: state.totals(),
                 predict: { ...predictStats },
+                reviewUsage: { ...reviewUsage },
                 ...state.snapshot(),
               }
             } else if (sub === '/config') {

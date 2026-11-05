@@ -326,6 +326,48 @@ test('setMaxDeltaMessages applies to the next flush', () => {
 
 // ── reviewer ─────────────────────────────────────────────────────────────────
 
+test('the review prompt is append-only so its prefix stays cacheable', async () => {
+  // Measured failure: re-sending `system + this delta` changed the prefix on
+  // every call, so the reviewer never hit the provider cache. Re-sending the
+  // deltas it already reviewed keeps everything before the new delta identical.
+  const llm = fakeLlm([
+    [JSON.stringify({ note: 'Nothing to add' })],
+    [JSON.stringify({ note: 'Nothing to add' })],
+  ])
+  const { r } = reviewer(llm)
+  r.enqueue(delta('first delta'))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  r.enqueue(delta('second delta'))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+
+  const second = llm.calls[1].messages[0].content[0].text
+  const first = llm.calls[0].messages[0].content[0].text
+
+  // Everything up to the end of the first delta must be byte-identical between
+  // the two calls; that is exactly what makes the prefix cacheable.
+  const head = first.slice(0, first.indexOf('first delta') + 'first delta'.length)
+  assert.ok(head.length > 0)
+  assert.equal(second.slice(0, head.length), head, 'the shared prefix is unchanged')
+  assert.match(second, /### Session update 1/)
+  assert.match(second, /### Session update 2/)
+  assert.ok(second.indexOf('first delta') < second.indexOf('second delta'), 'older delta first')
+  assert.deepEqual(r.ledgerInfo(), { entries: 2, chars: 'first delta'.length + 'second delta'.length, epoch: 0 })
+})
+
+test('an over-budget ledger restarts instead of growing without bound', async () => {
+  const llm = fakeLlm([[JSON.stringify({ note: 'Nothing to add' })]])
+  const { r } = reviewer(llm, { ledgerChars: 15 })
+  r.enqueue(delta('aaaaaaaaaa'))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  r.enqueue(delta('bbbbbbbbbb'))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  const info = r.ledgerInfo()
+  assert.equal(info.epoch, 1, 'one restart after the budget was exceeded')
+  assert.equal(info.entries, 1, 'only the newest delta survives a restart')
+  const prompt = llm.calls[1].messages[0].content[0].text
+  assert.doesNotMatch(prompt, /aaaaaaaaaa/, 'the dropped delta is gone')
+})
+
 function reviewer(llm, options = {}) {
   const notes = []
   const states = []

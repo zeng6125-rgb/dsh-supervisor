@@ -80,6 +80,19 @@ export interface ReviewerOptions {
    *  `reason` says which parse exit produced it; `failure` (for error-family
    *  outcomes) carries the kind + fingerprint the ledger groups by. */
   readonly onOutcome?: (outcome: ReviewOutcome, reply?: string, reason?: ParseFailReason, failure?: FailureInfo) => void
+  /**
+   * Token usage of every review call. The reviewer's own prompt is a cost the
+   * note ledger cannot show: whether those calls hit cache, and how much they
+   * add on top of the session they watch.
+   */
+  readonly onUsage?: (usage: {
+    inputTokens?: number
+    cacheReadTokens?: number
+    cacheWriteTokens?: number
+    outputTokens?: number
+  }) => void
+  /** Characters of reviewed history the ledger re-sends before it restarts. */
+  readonly ledgerChars?: number
   readonly logger?: { debug: (...args: unknown[]) => void; warn: (...args: unknown[]) => void }
 }
 
@@ -185,6 +198,17 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 export class Reviewer {
   private readonly guard = new EmissionGuard()
+  /**
+   * The review conversation is append-only on purpose: each call re-sends the
+   * deltas it already reviewed, so the provider sees a stable prefix and only
+   * the new delta is billed at full price. Re-sending just `system + this
+   * delta` changed the prefix on every call, which measured zero cache hits.
+   */
+  private ledger: string[] = []
+  /** Characters held in {@link ledger}; the restart budget is measured on this. */
+  private ledgerChars = 0
+  /** How many times the ledger restarted; each restart costs one uncached call. */
+  private ledgerEpoch = 0
   private readonly backlog: TranscriptDelta[] = []
   private readonly controller = new AbortController()
   private readonly callTimeoutMs: number
@@ -233,6 +257,28 @@ export class Reviewer {
   }
 
   /** Volatile config changed: budgets apply to the next call without losing the backlog. */
+  /**
+   * Append one delta, restarting the ledger when it outgrows the budget. A
+   * restart changes the prefix once and then re-warms, which is cheaper than
+   * letting the re-sent history grow without bound.
+   */
+  private appendToLedger(markdown: string): void {
+    const budget = this.options.ledgerChars ?? 120_000
+    this.ledger.push(markdown)
+    this.ledgerChars += markdown.length
+    if (this.ledgerChars <= budget) return
+    // Keep only the newest delta: one uncached call, then hits resume.
+    this.ledger = [markdown]
+    this.ledgerChars = markdown.length
+    this.ledgerEpoch += 1
+    this.options.logger?.debug?.('review ledger restarted', { epoch: this.ledgerEpoch, chars: this.ledgerChars })
+  }
+
+  /** Ledger state, for the panel: how much history reviews re-send. */
+  ledgerInfo(): { entries: number; chars: number; epoch: number } {
+    return { entries: this.ledger.length, chars: this.ledgerChars, epoch: this.ledgerEpoch }
+  }
+
   setBudgets(maxTokens: number, maxNoteChars: number): void {
     this.maxTokens = maxTokens
     this.maxNoteChars = maxNoteChars
@@ -411,7 +457,15 @@ export class Reviewer {
       // reasoning before any text. Inlining the prompt ahead of the transcript
       // was the only channel that held on every route we tested, so the review
       // call sends one user message: contract + `### Session update` + delta.
-      let promptText = `${this.options.systemPrompt}\n### Session update\n\n${delta.markdown}`
+      // Append the new delta BEFORE building the prompt: every earlier entry
+      // must be byte-identical to what the previous call sent, or the provider
+      // sees a different prefix and caches nothing.
+      this.appendToLedger(delta.markdown)
+      const parts: string[] = [this.options.systemPrompt]
+      for (let index = 0; index < this.ledger.length; index += 1) {
+        parts.push(`### Session update ${index + 1}\n\n${this.ledger[index]}`)
+      }
+      let promptText = parts.join('\n\n')
       const objective = this.options.getObjective?.()
       if (objective) promptText += `\n\n${buildObjectiveHint(objective)}`
       // The contract again at the very end: weak models forget the copy that
@@ -445,6 +499,7 @@ export class Reviewer {
         let finishKind: string | undefined
         let finished = false
         for await (const chunk of this.options.llm.stream(options as never)) {
+          if (chunk?.type === 'usage' && chunk.usage) this.options.onUsage?.(chunk.usage)
           if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text
           else if (chunk?.type === 'finish') {
             finished = true
