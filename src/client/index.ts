@@ -811,6 +811,7 @@ var FIELDS: FieldSpec[] = [
   { key: 'predictEnabled', label: '输入框续写建议', hint: '会话空闲且输入框为空时，用一条灰色短句替换官方 placeholder，预测你接下来想说什么；Tab 接受，Esc 或继续打字丢弃。运行中的会话不显示。', toggle: true },
   { key: 'predictChars', label: '续写长度上限（字）', hint: '建议的最长字数。越长越容易变成噪音。', min: 10, max: 200 },
   { key: 'attachSeverity', label: '谁能插话', hint: 'off = 全部只进面板，一句都不进对话（纯观察）；blocker = 只有「继续下去会白干」的才插话；all = 任何提醒都搭下一步。实测 all 档下超过一半的审查都会出声，长轮次里会连续打断。', options: ['off', 'blocker', 'all'] },
+  { key: 'reviewLedgerChars', label: '审查复述历史（字符）', hint: '审查每次会重发已审过的历史，让前缀不变从而实现缓存命中。越大命中率越高，但账本重启后那一次调用也越大。', min: 20000, max: 1000000 },
   { key: 'wakeGuard', label: '停滞即唤醒', hint: '审查判定「还有活没干完就停」且 agent 已空闲时，把它推回工作；与附加限流共用冷却窗口，不会连环唤醒。它只补一句提醒，不替 agent 做决定。', toggle: true },
   { key: 'fallbackRoute', label: '回退路由', hint: '审查路由连续失败后切到这条路由；留空则不启用回退，连续失败时面板会亮失明提醒。', select: 'route', ph: '不启用' },
   { key: 'fallbackAfterErrors', label: '回退触发（连败次数）', hint: '连续多少次 transient 失败后切回退路由。', min: 1, max: 20 },
@@ -953,7 +954,7 @@ function ConfigCard(props: CardProps) {
 
   // Four sectioned cards; every config key lives in exactly one.
   var GROUPS: Array<{ title: string; keys: string[] }> = [
-    { title: '运行', keys: ['enabled', 'stepsBetweenReviews', 'intercept', 'attachSeverity', 'attachIntervalSec', 'wakeGuard', 'predictEnabled', 'predictChars'] },
+    { title: '运行', keys: ['enabled', 'stepsBetweenReviews', 'intercept', 'attachSeverity', 'attachIntervalSec', 'wakeGuard', 'predictEnabled', 'predictChars', 'reviewLedgerChars'] },
     { title: '审查模型', keys: ['reviewRoute'] },
     { title: '故障回退', keys: ['fallbackRoute', 'fallbackAfterErrors'] },
     { title: '增量与预算', keys: ['maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens'] },

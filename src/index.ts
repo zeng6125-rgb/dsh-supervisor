@@ -96,6 +96,7 @@ function signature(cfg: Config): string {
     cfg.predictEnabled,
     cfg.predictChars,
     cfg.attachSeverity,
+    cfg.reviewLedgerChars,
   ].join('\u0000')
 }
 
@@ -121,6 +122,7 @@ const CONFIG_VALUE_KINDS: Record<string, 'boolean' | 'number' | 'string' | 'rout
   predictEnabled: 'boolean',
   predictChars: 'number',
   attachSeverity: 'string',
+  reviewLedgerChars: 'number',
 }
 
 /** Route keys a combined picker writes, and the config fields they map to. */
@@ -239,6 +241,12 @@ export function apply(ctx0: Context, config?: unknown): void {
    * pays full price every time, and nothing in the note ledger showed it.
    */
   const reviewUsage = { calls: 0, input: 0, read: 0, write: 0, output: 0 }
+  /**
+   * The last calls, one line each. The aggregate alone cannot answer whether a
+   * low hit rate is a cold start (first call after a reset) or a steady state,
+   * and that difference decides whether the ledger is worth its overhead.
+   */
+  const reviewSamples: Array<{ input: number; read: number; hit: number }> = []
   /** Route most recently seen on a real model call, as a fallback source. */
   let lastSeenRoute: { provider: string; model: string } | undefined
   /** The agent's last reply per session: what it just said drives the guess. */
@@ -403,6 +411,7 @@ export function apply(ctx0: Context, config?: unknown): void {
       systemPrompt: SUPERVISOR_SYSTEM_PROMPT,
       maxTokens: cfg.reviewMaxTokens,
       maxNoteChars: cfg.maxNoteChars,
+      ledgerChars: cfg.reviewLedgerChars,
       // Blind-spot fix: a dead review route no longer silences the session —
       // after enough consecutive failures the reviewer rides this route.
       getFallback: () =>
@@ -476,11 +485,18 @@ export function apply(ctx0: Context, config?: unknown): void {
       // Count finished reviews, not initiations, and record *how* each ended —
       // otherwise `reviews: 5` cannot be told apart from five silent failures.
       onUsage: (usage) => {
+        const input = usage.inputTokens ?? 0
+        const read = usage.cacheReadTokens ?? 0
         reviewUsage.calls += 1
-        reviewUsage.input += usage.inputTokens ?? 0
-        reviewUsage.read += usage.cacheReadTokens ?? 0
+        reviewUsage.input += input
+        reviewUsage.read += read
         reviewUsage.write += usage.cacheWriteTokens ?? 0
         reviewUsage.output += usage.outputTokens ?? 0
+        const total = input + read
+        if (total > 0) {
+          reviewSamples.push({ input, read, hit: read / total })
+          while (reviewSamples.length > 16) reviewSamples.shift()
+        }
       },
       onOutcome: (outcome, reply, reason, failure) => {
         state.recordReview(sessionId, outcome, reply, reason, failure)
@@ -942,7 +958,11 @@ export function apply(ctx0: Context, config?: unknown): void {
                 stepsBetweenReviews: cfg.stepsBetweenReviews,
                 totals: state.totals(),
                 predict: { ...predictStats },
-                reviewUsage: { ...reviewUsage },
+                reviewUsage: {
+                  ...reviewUsage,
+                  recent: reviewSamples.slice(),
+                  ledgerEpochs: [...reviewers.values()].reduce((sum, r) => sum + r.ledgerInfo().epoch, 0),
+                },
                 ...state.snapshot(),
               }
             } else if (sub === '/config') {
@@ -971,6 +991,7 @@ export function apply(ctx0: Context, config?: unknown): void {
                   predictEnabled: cfg.predictEnabled,
                   predictChars: cfg.predictChars,
                   attachSeverity: cfg.attachSeverity,
+                  reviewLedgerChars: cfg.reviewLedgerChars,
                 },
               }
             } else if (sub === '/models') {

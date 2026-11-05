@@ -92,6 +92,7 @@ test('resolveConfig unwraps volatile references', () => {
     predictEnabled: volatile(false),
     predictChars: volatile(80),
     attachSeverity: volatile('off'),
+    reviewLedgerChars: volatile(300000),
   })
   assert.deepEqual(cfg, {
     enabled: false,
@@ -110,6 +111,7 @@ test('resolveConfig unwraps volatile references', () => {
     predictEnabled: false,
     predictChars: 80,
     attachSeverity: 'off',
+    reviewLedgerChars: 300000,
   })
 })
 
@@ -124,7 +126,7 @@ test('the exported schema declares every field volatile', () => {
   // The settings service skips namespaces with no volatile field, so losing one
   // silently removes the row's configure form from the Plugins page.
   // An object schema keeps its fields under `dict`, each already a Schema.
-  const fields = ['enabled', 'stepsBetweenReviews', 'intercept', 'maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens', 'fallbackProvider', 'fallbackModel', 'fallbackAfterErrors', 'reviewProvider', 'reviewModel', 'attachIntervalSec', 'wakeGuard', 'predictEnabled', 'predictChars', 'attachSeverity']
+  const fields = ['enabled', 'stepsBetweenReviews', 'intercept', 'maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens', 'fallbackProvider', 'fallbackModel', 'fallbackAfterErrors', 'reviewProvider', 'reviewModel', 'attachIntervalSec', 'wakeGuard', 'predictEnabled', 'predictChars', 'attachSeverity', 'reviewLedgerChars']
   for (const field of fields) {
     assert.equal(ConfigSchema.dict[field].meta.volatile, true, `${field} is not volatile`)
   }
@@ -1169,6 +1171,14 @@ test('the all mode restores the old behaviour, and an unknown mode is conservati
   // A typo must not silently become "interrupt for everything".
   assert.equal(shouldAttach('concern', 'bogus'), false)
   assert.equal(shouldAttach('blocker', 'bogus'), true)
+})
+
+test('the review ledger budget defaults to 200k characters and never goes below 20k', () => {
+  // The budget is what keeps a review's prefix stable: too small and the ledger
+  // resets before the cache pays off, too large and the post-reset call is huge.
+  assert.equal(resolveConfig({}).reviewLedgerChars, 200000)
+  assert.equal(resolveConfig({ reviewLedgerChars: 5000 }).reviewLedgerChars, 20000)
+  assert.equal(resolveConfig({ reviewLedgerChars: '400000' }).reviewLedgerChars, 400000)
 })
 
 test('the default attach mode is blocker', () => {

@@ -56,6 +56,12 @@ export interface Config {
   predictEnabled: boolean
   /** Hard cap on the guess, in characters. A long ghost is noise. */
   predictChars: number
+  /**
+   * Characters of already-reviewed history a review call re-sends so its prefix
+   * stays byte-identical and can be cached. Bigger means a higher hit rate and a
+   * bigger first call after a reset; smaller resets more often.
+   */
+  reviewLedgerChars: number
 }
 
 /**
@@ -79,6 +85,7 @@ export const Config = z.object({
   attachIntervalSec: z.number().min(0).max(3600).default(180).volatile(),
   wakeGuard: z.boolean().default(true).volatile(),
   attachSeverity: z.string().default('blocker').volatile(),
+  reviewLedgerChars: z.number().min(20000).max(1000000).default(200000).volatile(),
   predictEnabled: z.boolean().default(true).volatile(),
   predictChars: z.number().min(10).max(200).default(40).volatile(),
 })
@@ -111,6 +118,10 @@ const DEFAULTS: Required<Config> = {
   // Only blockers interrupt by default: a note is worth an agent's attention
   // only when ignoring it plainly wastes the work in flight.
   attachSeverity: 'blocker',
+  // 200k characters of reviewed history: enough that reviews stop resetting
+  // their prefix every couple of calls, small enough that the single uncached
+  // call after a reset stays sane.
+  reviewLedgerChars: 200000,
   // Only a stopped session gets a ghost: while it runs, the route is busy and
   // a guess would be stale before it arrived.
   predictEnabled: true,
@@ -177,6 +188,7 @@ export function resolveConfig(raw: unknown): Required<Config> {
     attachIntervalSec: num(source.attachIntervalSec, DEFAULTS.attachIntervalSec, 0),
     wakeGuard: bool(source.wakeGuard, DEFAULTS.wakeGuard),
     attachSeverity: mode(source.attachSeverity, DEFAULTS.attachSeverity),
+    reviewLedgerChars: num(source.reviewLedgerChars, DEFAULTS.reviewLedgerChars, 20000),
     predictEnabled: bool(source.predictEnabled, DEFAULTS.predictEnabled),
     predictChars: num(source.predictChars, DEFAULTS.predictChars, 10),
   }
