@@ -355,21 +355,60 @@ test('the review prompt is append-only so its prefix stays cacheable', async () 
   assert.match(second, /### Session update 1/)
   assert.match(second, /### Session update 2/)
   assert.ok(second.indexOf('first delta') < second.indexOf('second delta'), 'older delta first')
-  assert.deepEqual(r.ledgerInfo(), { entries: 2, chars: 'first delta'.length + 'second delta'.length, epoch: 0 })
+  assert.deepEqual(r.ledgerInfo(), {
+    entries: 2,
+    chars: 'first delta'.length + 'second delta'.length,
+    epoch: 0,
+    lastDelta: 'second delta'.length,
+  })
 })
 
-test('an over-budget ledger restarts instead of growing without bound', async () => {
-  const llm = fakeLlm([[JSON.stringify({ note: 'Nothing to add' })]])
+test('a ledger smaller than its configured budget restarts instead of growing without bound', async () => {
+  // The budget is honoured as a floor for a few entries: with 10-char deltas a
+  // 15-char budget still keeps four of them, so the restart lands on the fifth.
+  const llm = fakeLlm(Array.from({ length: 6 }, () => [JSON.stringify({ note: 'Nothing to add' })]))
   const { r } = reviewer(llm, { ledgerChars: 15 })
-  r.enqueue(delta('aaaaaaaaaa'))
-  await new Promise((resolve) => setTimeout(resolve, 30))
-  r.enqueue(delta('bbbbbbbbbb'))
-  await new Promise((resolve) => setTimeout(resolve, 30))
+  for (const marker of ['aaaaaaaaaa', 'bbbbbbbbbb', 'cccccccccc', 'dddddddddd']) {
+    r.enqueue(delta(marker))
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  assert.equal(r.ledgerInfo().epoch, 0, 'four short deltas stay under the reserved room')
+
+  r.enqueue(delta('eeeeeeeeee'))
+  await new Promise((resolve) => setTimeout(resolve, 25))
   const info = r.ledgerInfo()
-  assert.equal(info.epoch, 1, 'one restart after the budget was exceeded')
+  assert.equal(info.epoch, 1, 'the fifth append outgrows the budget and restarts')
   assert.equal(info.entries, 1, 'only the newest delta survives a restart')
-  const prompt = llm.calls[1].messages[0].content[0].text
+  const prompt = llm.calls[4].messages[0].content[0].text
   assert.doesNotMatch(prompt, /aaaaaaaaaa/, 'the dropped delta is gone')
+  assert.match(prompt, /eeeeeeeeee/)
+})
+
+test('one delta larger than the budget does not reset the ledger on every call', async () => {
+  // Measured on live traffic: cached bytes came out slightly SMALLER than new
+  // ones on every review, i.e. the ledger held a single entry — a fixed budget
+  // smaller than one delta resets it on every append, so the prefix never
+  // survives to a second call and no review can ever hit the cache.
+  const llm = fakeLlm([
+    [JSON.stringify({ note: 'Nothing to add' })],
+    [JSON.stringify({ note: 'Nothing to add' })],
+  ])
+  const { r } = reviewer(llm, { ledgerChars: 200_000 })
+  const huge = 'x'.repeat(300_000)
+  r.enqueue(delta(`first-${huge}`))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(r.ledgerInfo().entries, 1)
+  r.enqueue(delta(`second-${huge}`))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+
+  const info = r.ledgerInfo()
+  assert.equal(info.epoch, 0, 'a delta bigger than the budget must not force a reset')
+  assert.equal(info.entries, 2, 'two huge deltas still share a prefix')
+  // The whole first prompt must be a prefix of the second one, or nothing cacheable.
+  const first = llm.calls[0].messages[0].content[0].text
+  const second = llm.calls[1].messages[0].content[0].text
+  const head = first.slice(0, first.indexOf('first-') + 'first-'.length + huge.length)
+  assert.equal(second.slice(0, head.length), head)
 })
 
 function reviewer(llm, options = {}) {

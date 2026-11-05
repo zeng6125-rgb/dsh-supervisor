@@ -209,6 +209,8 @@ export class Reviewer {
   private ledgerChars = 0
   /** How many times the ledger restarted; each restart costs one uncached call. */
   private ledgerEpoch = 0
+  /** Size of the most recent delta; the budget adapts to it. */
+  private lastDeltaChars = 0
   private readonly backlog: TranscriptDelta[] = []
   private readonly controller = new AbortController()
   private readonly callTimeoutMs: number
@@ -263,7 +265,14 @@ export class Reviewer {
    * letting the re-sent history grow without bound.
    */
   private appendToLedger(markdown: string): void {
-    const budget = this.options.ledgerChars ?? 120_000
+    this.lastDeltaChars = markdown.length
+    // A fixed budget is wrong when one delta is larger than it: every append
+    // would reset immediately and the prefix would never survive to a second
+    // call (measured: cached bytes came out smaller than the new ones on every
+    // review). Keep a few entries whatever the delta size, but fewer when a
+    // single delta is already enormous.
+    const keep = markdown.length > 200_000 ? 2 : 4
+    const budget = Math.max(this.options.ledgerChars ?? 200_000, keep * markdown.length)
     this.ledger.push(markdown)
     this.ledgerChars += markdown.length
     if (this.ledgerChars <= budget) return
@@ -275,8 +284,13 @@ export class Reviewer {
   }
 
   /** Ledger state, for the panel: how much history reviews re-send. */
-  ledgerInfo(): { entries: number; chars: number; epoch: number } {
-    return { entries: this.ledger.length, chars: this.ledgerChars, epoch: this.ledgerEpoch }
+  ledgerInfo(): { entries: number; chars: number; epoch: number; lastDelta: number } {
+    return {
+      entries: this.ledger.length,
+      chars: this.ledgerChars,
+      epoch: this.ledgerEpoch,
+      lastDelta: this.lastDeltaChars,
+    }
   }
 
   setBudgets(maxTokens: number, maxNoteChars: number): void {
