@@ -41,6 +41,7 @@ step/end × N → delta → ① LLM 审查 → ② 解析 + guard → ③ 投递
 | `stepsBetweenReviews` | `6` | 每多少个 step 审查一次；额外成本约 1/N |
 | `intercept` | `false` | 开启后提醒在**下一个 step** 即附加；默认（关）只在**更晚轮次**的首个 step 附加，不打断当前轮 |
 | `attachIntervalSec` | `180` | 附加限流：同一会话两次附加之间的最小间隔（0 = 关闭）。冷却期内攒下的旧提醒只上面板，到点附加最新一条；唤醒也吃这个窗口 |
+| `reviewLedgerChars` | `0` | 审查复述历史：0 = 只发新 delta（最省，默认）。填大值让审查重发已审过的历史，缓存命中率变高但账单同步变高（命中仍按约 0.1× 计费） |
 | `attachSeverity` | `blocker` | 谁能插话。`off` = 全部只进面板（纯观察）；`blocker` = 只有「继续下去会白干」的才插话；`all` = 任何提醒都搭下一步。实测 `all` 下超过一半的审查都会出声，长轮次里等于连续打断 |
 | `wakeGuard` | `true` | 停滞即唤醒：审查判定「还有活没干完就停手」且 agent 已空闲时，开一轮把它推回工作。关闭后这类提醒只上面板 |
 | `fallbackProvider` / `fallbackModel` | `''` | 回退审查路由；都填才启用 |

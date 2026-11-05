@@ -58,8 +58,14 @@ export interface Config {
   predictChars: number
   /**
    * Characters of already-reviewed history a review call re-sends so its prefix
-   * stays byte-identical and can be cached. Bigger means a higher hit rate and a
-   * bigger first call after a reset; smaller resets more often.
+   * stays byte-identical and can be cached. 0 (the default) sends only the new
+   * delta.
+   *
+   * Why 0: a cache hit still bills about a tenth of a miss, so re-sending N-1
+   * reviewed deltas costs 1 + 0.1(N-1) times the new-only price. The ledger
+   * raises the hit RATE (0% -> ~75% at four entries) and raises the BILL by the
+   * same arithmetic — measured +9% at a half-full ledger. It is kept for the
+   * quality case only: more context per review, paid for on purpose.
    */
   reviewLedgerChars: number
 }
@@ -85,7 +91,7 @@ export const Config = z.object({
   attachIntervalSec: z.number().min(0).max(3600).default(180).volatile(),
   wakeGuard: z.boolean().default(true).volatile(),
   attachSeverity: z.string().default('blocker').volatile(),
-  reviewLedgerChars: z.number().min(20000).max(1000000).default(200000).volatile(),
+  reviewLedgerChars: z.number().min(0).max(1000000).default(0).volatile(),
   predictEnabled: z.boolean().default(true).volatile(),
   predictChars: z.number().min(10).max(200).default(40).volatile(),
 })
@@ -118,10 +124,9 @@ const DEFAULTS: Required<Config> = {
   // Only blockers interrupt by default: a note is worth an agent's attention
   // only when ignoring it plainly wastes the work in flight.
   attachSeverity: 'blocker',
-  // 200k characters of reviewed history: enough that reviews stop resetting
-  // their prefix every couple of calls, small enough that the single uncached
-  // call after a reset stays sane.
-  reviewLedgerChars: 200000,
+  // Off: re-sending reviewed deltas buys a prettier hit rate and a bigger bill.
+  // Turn it on only to give reviews more context on purpose.
+  reviewLedgerChars: 0,
   // Only a stopped session gets a ghost: while it runs, the route is busy and
   // a guess would be stale before it arrived.
   predictEnabled: true,
@@ -188,7 +193,7 @@ export function resolveConfig(raw: unknown): Required<Config> {
     attachIntervalSec: num(source.attachIntervalSec, DEFAULTS.attachIntervalSec, 0),
     wakeGuard: bool(source.wakeGuard, DEFAULTS.wakeGuard),
     attachSeverity: mode(source.attachSeverity, DEFAULTS.attachSeverity),
-    reviewLedgerChars: num(source.reviewLedgerChars, DEFAULTS.reviewLedgerChars, 20000),
+    reviewLedgerChars: num(source.reviewLedgerChars, DEFAULTS.reviewLedgerChars, 0),
     predictEnabled: bool(source.predictEnabled, DEFAULTS.predictEnabled),
     predictChars: num(source.predictChars, DEFAULTS.predictChars, 10),
   }

@@ -330,15 +330,15 @@ test('setMaxDeltaMessages applies to the next flush', () => {
 
 // ── reviewer ─────────────────────────────────────────────────────────────────
 
-test('the review prompt is append-only so its prefix stays cacheable', async () => {
-  // Measured failure: re-sending `system + this delta` changed the prefix on
-  // every call, so the reviewer never hit the provider cache. Re-sending the
-  // deltas it already reviewed keeps everything before the new delta identical.
+test('an opted-in ledger re-sends reviewed deltas byte-identically, so its prefix can cache', async () => {
+  // The ledger is off by default because it raises the bill (a cache hit still
+  // costs ~10% of a miss). When it IS on, the earlier entries must be unchanged
+  // byte for byte, or the provider sees a different prefix and caches nothing.
   const llm = fakeLlm([
     [JSON.stringify({ note: 'Nothing to add' })],
     [JSON.stringify({ note: 'Nothing to add' })],
   ])
-  const { r } = reviewer(llm)
+  const { r } = reviewer(llm, { ledgerChars: 200_000 })
   r.enqueue(delta('first delta'))
   await new Promise((resolve) => setTimeout(resolve, 30))
   r.enqueue(delta('second delta'))
@@ -358,6 +358,31 @@ test('the review prompt is append-only so its prefix stays cacheable', async () 
   assert.deepEqual(r.ledgerInfo(), {
     entries: 2,
     chars: 'first delta'.length + 'second delta'.length,
+    epoch: 0,
+    lastDelta: 'second delta'.length,
+  })
+})
+
+test('a zero budget sends only the new delta', async () => {
+  // The cheapest review: nothing reviewed earlier is re-sent, so the prompt is
+  // exactly the delta in question. Cache hits are impossible by construction,
+  // and that is the point — a hit still bills a tenth of a miss.
+  const llm = fakeLlm([
+    [JSON.stringify({ note: 'Nothing to add' })],
+    [JSON.stringify({ note: 'Nothing to add' })],
+  ])
+  const { r } = reviewer(llm)
+  r.enqueue(delta('first delta'))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  r.enqueue(delta('second delta'))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+
+  const second = llm.calls[1].messages[0].content[0].text
+  assert.doesNotMatch(second, /first delta/, 'reviewed history is not re-sent')
+  assert.match(second, /second delta/)
+  assert.deepEqual(r.ledgerInfo(), {
+    entries: 1,
+    chars: 'second delta'.length,
     epoch: 0,
     lastDelta: 'second delta'.length,
   })
@@ -1212,12 +1237,13 @@ test('the all mode restores the old behaviour, and an unknown mode is conservati
   assert.equal(shouldAttach('blocker', 'bogus'), true)
 })
 
-test('the review ledger budget defaults to 200k characters and never goes below 20k', () => {
-  // The budget is what keeps a review's prefix stable: too small and the ledger
-  // resets before the cache pays off, too large and the post-reset call is huge.
-  assert.equal(resolveConfig({}).reviewLedgerChars, 200000)
-  assert.equal(resolveConfig({ reviewLedgerChars: 5000 }).reviewLedgerChars, 20000)
+test('the review ledger budget is off by default and accepts an opt-in', () => {
+  // Off is the cheapest setting: a review then carries only the delta it was
+  // asked about. Re-sending reviewed history trades a bigger bill for a bigger
+  // hit rate, which is a deliberate quality/cost choice, not a default.
+  assert.equal(resolveConfig({}).reviewLedgerChars, 0)
   assert.equal(resolveConfig({ reviewLedgerChars: '400000' }).reviewLedgerChars, 400000)
+  assert.equal(resolveConfig({ reviewLedgerChars: -5 }).reviewLedgerChars, 0)
 })
 
 test('the default attach mode is blocker', () => {

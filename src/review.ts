@@ -266,13 +266,22 @@ export class Reviewer {
    */
   private appendToLedger(markdown: string): void {
     this.lastDeltaChars = markdown.length
+    const configured = this.options.ledgerChars ?? 0
+    if (configured <= 0) {
+      // No ledger: the prompt carries only this delta. Cheapest, because a cache
+      // hit still bills a tenth of a miss — re-sending reviewed history raises
+      // the hit rate and the bill together.
+      this.ledger = [markdown]
+      this.ledgerChars = markdown.length
+      return
+    }
     // A fixed budget is wrong when one delta is larger than it: every append
     // would reset immediately and the prefix would never survive to a second
     // call (measured: cached bytes came out smaller than the new ones on every
     // review). Keep a few entries whatever the delta size, but fewer when a
     // single delta is already enormous.
     const keep = markdown.length > 200_000 ? 2 : 4
-    const budget = Math.max(this.options.ledgerChars ?? 200_000, keep * markdown.length)
+    const budget = Math.max(configured, keep * markdown.length)
     this.ledger.push(markdown)
     this.ledgerChars += markdown.length
     if (this.ledgerChars <= budget) return

@@ -242,6 +242,12 @@ export function apply(ctx0: Context, config?: unknown): void {
    */
   const reviewUsage = { calls: 0, input: 0, read: 0, write: 0, output: 0 }
   /**
+   * A cache hit bills a fraction of a miss, so the hit RATE is not the cost:
+   * what the reviews actually cost is `input + read * 0.1`. Reported beside the
+   * rate so a prettier percentage cannot hide a bigger bill.
+   */
+  const CACHE_HIT_PRICE = 0.1
+  /**
    * The last calls, one line each. The aggregate alone cannot answer whether a
    * low hit rate is a cold start (first call after a reset) or a steady state,
    * and that difference decides whether the ledger is worth its overhead.
@@ -960,6 +966,11 @@ export function apply(ctx0: Context, config?: unknown): void {
                 predict: { ...predictStats },
                 reviewUsage: {
                   ...reviewUsage,
+                  billed: Math.round(reviewUsage.input + reviewUsage.read * CACHE_HIT_PRICE),
+                  hitRate:
+                    reviewUsage.input + reviewUsage.read > 0
+                      ? reviewUsage.read / (reviewUsage.input + reviewUsage.read)
+                      : 0,
                   recent: reviewSamples.slice(),
                   ledgerEpochs: [...reviewers.values()].reduce((sum, r) => sum + r.ledgerInfo().epoch, 0),
                 },
