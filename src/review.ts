@@ -532,6 +532,13 @@ export class Reviewer {
         }
         if (!finished) throw new Error('review stream ended without a finish reason')
 
+        // An aborted stream is not a contract violation. It means the reviewer
+        // was torn down mid-call (a restart, a disabled plugin, a disposed
+        // session), and the empty text would otherwise be booked as `no_frame`
+        // — which points a future investigation at the prompt instead of at the
+        // lifecycle. Throwing here routes it to the failure ledger as `aborted`.
+        if (finishKind === 'aborted') throw new Error('review stream aborted')
+
         const parsed = this.parse(text)
         if (parsed.kind === 'silent') {
           this.options.logger?.debug?.('review produced no actionable note')

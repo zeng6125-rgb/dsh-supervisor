@@ -44,11 +44,12 @@ function fakeLlm(script) {
   }
 }
 
-function delivery(intercept = false, attachCooldownMs = 0, now = () => Date.now()) {
+function delivery(intercept = false, attachCooldownMs = 0, now = () => Date.now(), attachFreshSteps = 0) {
   const warnings = []
   const d = new SupervisorDelivery({
     intercept,
     attachCooldownMs: () => attachCooldownMs,
+    attachFreshSteps: () => attachFreshSteps,
     now,
     createUserMessage: (input) => ({ role: 'user', ...input }),
     boundContextSummary: (summary) => summary,
@@ -92,6 +93,7 @@ test('resolveConfig unwraps volatile references', () => {
     predictEnabled: volatile(false),
     predictChars: volatile(80),
     attachSeverity: volatile('off'),
+    attachFreshSteps: volatile(5),
     reviewLedgerChars: volatile(300000),
   })
   assert.deepEqual(cfg, {
@@ -111,6 +113,7 @@ test('resolveConfig unwraps volatile references', () => {
     predictEnabled: false,
     predictChars: 80,
     attachSeverity: 'off',
+    attachFreshSteps: 5,
     reviewLedgerChars: 300000,
   })
 })
@@ -126,7 +129,7 @@ test('the exported schema declares every field volatile', () => {
   // The settings service skips namespaces with no volatile field, so losing one
   // silently removes the row's configure form from the Plugins page.
   // An object schema keeps its fields under `dict`, each already a Schema.
-  const fields = ['enabled', 'stepsBetweenReviews', 'intercept', 'maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens', 'fallbackProvider', 'fallbackModel', 'fallbackAfterErrors', 'reviewProvider', 'reviewModel', 'attachIntervalSec', 'wakeGuard', 'predictEnabled', 'predictChars', 'attachSeverity', 'reviewLedgerChars']
+  const fields = ['enabled', 'stepsBetweenReviews', 'intercept', 'maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens', 'fallbackProvider', 'fallbackModel', 'fallbackAfterErrors', 'reviewProvider', 'reviewModel', 'attachIntervalSec', 'wakeGuard', 'predictEnabled', 'predictChars', 'attachSeverity', 'attachFreshSteps', 'reviewLedgerChars']
   for (const field of fields) {
     assert.equal(ConfigSchema.dict[field].meta.volatile, true, `${field} is not volatile`)
   }
@@ -1001,6 +1004,74 @@ test('raise queues the note without waking, injecting or holding anything', () =
   assert.equal(d.raise(sid, note('you are guessing the API shape')), 'pending')
   assert.equal(d.hasPending(sid), true)
   assert.equal(warnings.length, 0)
+})
+
+test('a note from a moment the agent has left is parked, not spoken', () => {
+  // The mechanism the user feels as lost momentum: a review at step 12 of a
+  // turn that runs to step 40 is about work already finished, and landing it on
+  // the next turn makes the agent re-open settled work.
+  const { d } = delivery(false, 0, () => 0, 12)
+  d.notePosition(sid, 1, 12) // the reviewer looked at step 12 of turn 1
+  d.raise(sid, note('you are about to compile — hold on'))
+  d.notePosition(sid, 1, 40) // the turn actually ended at step 40
+  const attached = []
+  const parked = []
+  const decision = d.attachToStep(
+    sid,
+    { kind: 'enter', messages: [{ id: 'u1' }] },
+    2,
+    (notes) => attached.push(...notes),
+    (notes) => parked.push(...notes),
+  )
+  assert.equal(decision.messages.length, 1, 'nothing was appended to the step')
+  assert.deepEqual(attached, [])
+  assert.deepEqual(parked.map((n) => n.note), ['you are about to compile — hold on'])
+  assert.equal(d.hasPending(sid), false, 'the stale note left the queue for the panel')
+})
+
+test('a note about the turn tail is still spoken, so long spins keep their warning', () => {
+  // The gate must not silence the case that matters most: the agent spinning at
+  // the END of a long turn is exactly what a late review should catch.
+  const { d } = delivery(false, 0, () => 0, 12)
+  d.notePosition(sid, 1, 36)
+  d.raise(sid, note('you have retried the same build three times'))
+  d.notePosition(sid, 1, 40)
+  const attached = []
+  const decision = d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u1' }] }, 2, (n) => attached.push(...n))
+  assert.equal(decision.messages.length, 2)
+  assert.equal(attached.length, 1)
+})
+
+test('a stale-only queue does not spend the attach cooldown', () => {
+  // Burning the window on notes nobody will see would delay the next real one.
+  let now = 1_000
+  const { d } = delivery(false, 60_000, () => now, 5)
+  d.notePosition(sid, 1, 1)
+  d.raise(sid, note('stale'))
+  d.notePosition(sid, 1, 50)
+  d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u1' }] }, 2) // parks it, no attach
+
+  d.notePosition(sid, 2, 50)
+  d.raise(sid, note('fresh'))
+  now = 1_500 // only 500ms later: without a spent cooldown this must attach
+  const decision = d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u2' }] }, 3)
+  assert.equal(decision.messages.length, 2, 'the fresh note attached inside the old window')
+})
+
+test('a note from an earlier turn counts as stale, and 0 disables the gate', () => {
+  const { d } = delivery(false, 0, () => 0, 0)
+  d.notePosition(sid, 1, 5)
+  d.raise(sid, note('older turn'))
+  d.notePosition(sid, 3, 90)
+  const open = d.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u1' }] }, 4)
+  assert.equal(open.messages.length, 2, 'gate 0 attaches regardless of age')
+
+  const { d: gated } = delivery(false, 0, () => 0, 5)
+  gated.notePosition(sid, 1, 5)
+  gated.raise(sid, note('older turn'))
+  gated.notePosition(sid, 3, 6)
+  const closed = gated.attachToStep(sid, { kind: 'enter', messages: [{ id: 'u1' }] }, 4)
+  assert.equal(closed.messages.length, 1, 'a note from turn 1 is stale by turn 3')
 })
 
 test('attach cooldown holds a second note inside the window', () => {

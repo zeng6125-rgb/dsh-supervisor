@@ -25,7 +25,7 @@ step/end × N → delta → ① LLM 审查 → ② 解析 + guard → ③ 投递
 
 ① **LLM 审查**：严格 JSON frame；第一次解析失败会追加 `UNPARSEABLE_NUDGE` 重试一次。输出契约结尾重复（`CONTRACT_REMINDER`）——弱模型读到长增量尾部会忘掉开头的契约（实测 no_frame 率 48%→10%）。
 
-② **解析**：容错提取第一个平衡的 `{…}`（容忍散文与 markdown fence）。失败按**最终出口**记账：`no_frame` / `json_error` / `empty_note` / `bad_shape`。
+② **解析**：容错提取第一个平衡的 `{…}`（容忍散文与 markdown fence）。失败按**最终出口**记账：`no_frame` / `json_error` / `empty_note` / `bad_shape`。**流被中止不算契约失败**：`finish=aborted`（重启、插件卸载、会话销毁）单独计入失败指纹 `aborted`，否则空回复会被误记成 `no_frame`，把排查方向指向提示词而不是生命周期。
 
 ③ **投递（队列 + 附加 + 限流）**：提醒**不注入**进行中的工作（实测 `agent.inject` 的注记会变成该 step 的 user 消息，让 agent 停下只答监管、对话断流）。改为：note 先排队，到 `agent/pre-step` 时才决定何时附加——默认（`intercept` 关）在**比所审轮次更晚的轮次**首个 step 把 note 追加进 `messages` 尾部；`intercept` 开时在下一个 step 即附加。附加时**原样保留 decision 的 `startsRequestSeries`**（不 reject、不重排），请求序列与前缀缓存不被打断。在此之上再加**附加限流**（`attachIntervalSec`，默认 180 秒）：同一会话两次附加之间强制冷却，冷却期内攒下的提醒只排队；到点只附加**最新一条**（监管看的是最新的动作），更旧的 park 到面板（仍可见、可已读，不静默丢）——实测活跃会话曾 22 秒~2 分钟连发，观感就是"连着审查"；设 0 关闭限流，恢复旧的按序全部附加。**谁能插话**（`attachSeverity`）是这条链上最影响体感的一档：`off` 让审查退化为纯观察（提醒只上面板，一句都不进对话，也不会唤醒）；`blocker`（默认）只放行「继续下去 plainly 浪费工作」的提醒，其余上面板；`all` 是旧行为。之所以默认收紧：实测 `all` 档下 6037 次审查产出 3174 条提醒（52.6%），按每 12 步一次审查、单轮 30~70 步算，一轮会插 2~5 条——这正是"模型节奏被打断"的来源。它只提醒、不授权、不替 agent 做决定。与上一条同级别重复的提醒会被 emission guard 吞掉（`suppressed`）。
 
@@ -42,6 +42,7 @@ step/end × N → delta → ① LLM 审查 → ② 解析 + guard → ③ 投递
 | `intercept` | `false` | 开启后提醒在**下一个 step** 即附加；默认（关）只在**更晚轮次**的首个 step 附加，不打断当前轮 |
 | `attachIntervalSec` | `180` | 附加限流：同一会话两次附加之间的最小间隔（0 = 关闭）。冷却期内攒下的旧提醒只上面板，到点附加最新一条；唤醒也吃这个窗口 |
 | `reviewLedgerChars` | `0` | 审查复述历史：0 = 只发新 delta（最省，默认）。填大值让审查重发已审过的历史，缓存命中率变高但账单同步变高（命中仍按约 0.1× 计费） |
+| `attachFreshSteps` | `12` | 过期步数：提醒写入后超过这么多步，说明 agent 早已走过那个位置，只上面板不插话（0 = 关闭）。这是「不打断节奏」的核心闸门 |
 | `attachSeverity` | `blocker` | 谁能插话。`off` = 全部只进面板（纯观察）；`blocker` = 只有「继续下去会白干」的才插话；`all` = 任何提醒都搭下一步。实测 `all` 下超过一半的审查都会出声，长轮次里等于连续打断 |
 | `wakeGuard` | `true` | 停滞即唤醒：审查判定「还有活没干完就停手」且 agent 已空闲时，开一轮把它推回工作。关闭后这类提醒只上面板 |
 | `fallbackProvider` / `fallbackModel` | `''` | 回退审查路由；都填才启用 |

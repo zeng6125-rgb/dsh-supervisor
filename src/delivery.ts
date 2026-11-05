@@ -24,6 +24,14 @@ export interface DeliveryOptions {
   intercept: boolean
   /** Milliseconds between two attaches for one session (0 disables the rate limit). */
   attachCooldownMs: () => number
+  /**
+   * How many steps behind the turn's frontier a note may be and still be spoken.
+   * A note describes the moment it was written: a review at step 12 of a turn
+   * that ran to step 40 is about work the agent finished long ago, and landing
+   * it later makes the agent re-litigate settled work — the interruption the
+   * user feels as lost momentum. 0 disables the gate.
+   */
+  attachFreshSteps: () => number
   createUserMessage: (input: any) => any
   boundContextSummary: (summary: string) => string
   /** Injectable clock for tests. */
@@ -51,12 +59,18 @@ export function renderNoteText(note: SupervisorNote): string {
 }
 
 export class SupervisorDelivery {
-  /** Notes waiting to ride a step, per session. */
-  private readonly pending = new Map<string, SupervisorNote[]>()
+  /**
+   * Notes waiting to ride a step, per session, each tagged with the position it
+   * was written at so a stale one can be recognised when the turn that produced
+   * it has moved on.
+   */
+  private readonly pending = new Map<string, Array<{ note: SupervisorNote; turn: number; step: number }>>()
   /** Turn the pending notes belong to, so the default path waits for a later one. */
   private readonly raisedTurn = new Map<string, number>()
   /** Latest turn observed entering a step, per session. */
   private readonly lastTurn = new Map<string, number>()
+  /** Latest committed step, per session: the frontier a note is measured against. */
+  private readonly lastStep = new Map<string, { turn: number; step: number }>()
   /** When this session was last spoken to, for the attach cooldown. */
   private readonly lastAttach = new Map<string, number>()
   private readonly now: () => number
@@ -76,6 +90,12 @@ export class SupervisorDelivery {
     this.pending.delete(sessionId)
     this.raisedTurn.delete(sessionId)
     this.lastAttach.delete(sessionId)
+    this.lastStep.delete(sessionId)
+  }
+
+  /** Record a committed step, so queued notes can be aged against it. */
+  notePosition(sessionId: string, turn: number, step: number): void {
+    this.lastStep.set(sessionId, { turn, step })
   }
 
   hasPending(sessionId: string): boolean {
@@ -91,7 +111,7 @@ export class SupervisorDelivery {
     const queue = this.pending.get(sessionId) ?? []
     this.pending.delete(sessionId)
     this.raisedTurn.delete(sessionId)
-    return queue
+    return queue.map((entry) => entry.note)
   }
 
   /**
@@ -118,7 +138,8 @@ export class SupervisorDelivery {
   /** A note survived the emission guard: it waits for a step to ride. */
   raise(sessionId: string, note: SupervisorNote): 'pending' {
     const queue = this.pending.get(sessionId) ?? []
-    queue.push(note)
+    const at = this.lastStep.get(sessionId)
+    queue.push({ note, turn: at?.turn ?? this.lastTurn.get(sessionId) ?? 0, step: at?.step ?? 0 })
     this.pending.set(sessionId, queue)
     if (!this.raisedTurn.has(sessionId)) {
       // Anchor to the turn these notes were reviewed in; the default path then
@@ -167,6 +188,34 @@ export class SupervisorDelivery {
       const anchor = this.raisedTurn.get(sessionId) ?? 0
       if (turn <= anchor) return decision // wait for a later turn
     }
+    // Freshness gate, ahead of the cooldown so a queue of stale notes cannot
+    // burn the window: a note is worth the agent's attention only while it is
+    // still about where the agent actually is.
+    const window = this.options.attachFreshSteps()
+    const frontier = this.lastStep.get(sessionId)
+    const stale: SupervisorNote[] = []
+    const fresh: typeof queue = []
+    for (const entry of queue) {
+      const behind =
+        window <= 0 || !frontier
+          ? 0 // gate disabled, or nothing recorded to age against
+          : entry.turn === frontier.turn
+            ? frontier.step - entry.step
+            : Number.POSITIVE_INFINITY // written in an earlier turn: already past
+      if (behind <= window) fresh.push(entry)
+      else stale.push(entry.note)
+    }
+    if (stale.length > 0) {
+      onParked?.(stale)
+      this.pending.set(sessionId, fresh)
+      this.options.logger?.debug?.('stale notes parked on the panel', { sessionId, count: stale.length })
+    }
+    if (fresh.length === 0) {
+      this.pending.delete(sessionId)
+      this.raisedTurn.delete(sessionId)
+      return decision
+    }
+
     const cooldown = this.options.attachCooldownMs()
     const rateLimited = cooldown > 0
     if (rateLimited) {
@@ -176,11 +225,12 @@ export class SupervisorDelivery {
     }
     this.pending.delete(sessionId)
     this.raisedTurn.delete(sessionId)
-    const attached = rateLimited ? [queue[queue.length - 1]] : queue
-    const parked = rateLimited ? queue.slice(0, -1) : []
-    if (parked.length > 0) onParked?.(parked)
-    onAttached?.(attached)
-    const extra = attached.map((note) => this.buildMessage(note))
+    const attached = rateLimited ? [fresh[fresh.length - 1]] : fresh
+    const superseded = rateLimited ? fresh.slice(0, -1).map((entry) => entry.note) : []
+    if (superseded.length > 0) onParked?.(superseded)
+    const notes = attached.map((entry) => entry.note)
+    onAttached?.(notes)
+    const extra = notes.map((note) => this.buildMessage(note))
     return { ...decision, messages: [...(decision.messages ?? []), ...extra] }
   }
 }

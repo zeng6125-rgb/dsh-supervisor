@@ -807,6 +807,7 @@ var FIELDS: FieldSpec[] = [
   { key: 'enabled', label: '启用', hint: '开启后台审查员盯着每个会话。关闭时审查员不会调用任何模型。', toggle: true },
   { key: 'stepsBetweenReviews', label: '审查间隔（步）', hint: '每多少步审查一次。额外 token 成本约为 1/N。', min: 1, max: 60 },
   { key: 'intercept', label: '下一步即附加', hint: '提醒默认等你下次提问时才进入会话；开启后它随下一个 step 附加（不重排、不打断轮次）。', toggle: true },
+  { key: 'attachFreshSteps', label: '过期步数（步）', hint: '提醒只在仍然贴着当前进度时才进入对话：写入后超过这么多步的，说明 agent 早已做过那件事，只上面板（0 = 关闭该闸门）。这防止「让模型回头重查早已结束的事」而打断节奏。', min: 0, max: 200 },
   { key: 'attachIntervalSec', label: '附加限流（秒）', hint: '同一会话两次附加提醒之间的最小间隔：活跃会话不会每轮都被插话。冷却期间攒下的旧提醒只上面板，到点附加最新一条。0 = 关闭限流。', min: 0, max: 3600 },
   { key: 'predictEnabled', label: '输入框续写建议', hint: '会话空闲且输入框为空时，用一条灰色短句替换官方 placeholder，预测你接下来想说什么；Tab 接受，Esc 或继续打字丢弃。运行中的会话不显示。', toggle: true },
   { key: 'predictChars', label: '续写长度上限（字）', hint: '建议的最长字数。越长越容易变成噪音。', min: 10, max: 200 },
@@ -954,7 +955,7 @@ function ConfigCard(props: CardProps) {
 
   // Four sectioned cards; every config key lives in exactly one.
   var GROUPS: Array<{ title: string; keys: string[] }> = [
-    { title: '运行', keys: ['enabled', 'stepsBetweenReviews', 'intercept', 'attachSeverity', 'attachIntervalSec', 'wakeGuard', 'predictEnabled', 'predictChars', 'reviewLedgerChars'] },
+    { title: '运行', keys: ['enabled', 'stepsBetweenReviews', 'intercept', 'attachSeverity', 'attachFreshSteps', 'attachIntervalSec', 'wakeGuard', 'predictEnabled', 'predictChars', 'reviewLedgerChars'] },
     { title: '审查模型', keys: ['reviewRoute'] },
     { title: '故障回退', keys: ['fallbackRoute', 'fallbackAfterErrors'] },
     { title: '增量与预算', keys: ['maxDeltaMessages', 'maxNoteChars', 'reviewMaxTokens'] },

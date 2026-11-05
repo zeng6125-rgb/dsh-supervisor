@@ -96,6 +96,7 @@ function signature(cfg: Config): string {
     cfg.predictEnabled,
     cfg.predictChars,
     cfg.attachSeverity,
+    cfg.attachFreshSteps,
     cfg.reviewLedgerChars,
   ].join('\u0000')
 }
@@ -122,6 +123,7 @@ const CONFIG_VALUE_KINDS: Record<string, 'boolean' | 'number' | 'string' | 'rout
   predictEnabled: 'boolean',
   predictChars: 'number',
   attachSeverity: 'string',
+  attachFreshSteps: 'number',
   reviewLedgerChars: 'number',
 }
 
@@ -271,6 +273,7 @@ export function apply(ctx0: Context, config?: unknown): void {
     intercept: cfg.intercept,
     // Live-read: a settings-page change hot-swaps the window without remount.
     attachCooldownMs: () => cfg.attachIntervalSec * 1000,
+    attachFreshSteps: () => cfg.attachFreshSteps,
     createUserMessage,
     boundContextSummary,
     logger: log,
@@ -521,8 +524,11 @@ export function apply(ctx0: Context, config?: unknown): void {
   const transcript = new SessionTranscript({
     stepsBetweenReviews: cfg.stepsBetweenReviews,
     maxDeltaMessages: cfg.maxDeltaMessages,
-    onStepEnd: (sessionId) => {
+    onStepEnd: (sessionId, turn, step) => {
       state.bump(sessionId, 'steps')
+      // The frontier a queued note is aged against: a note written at step 12
+      // of a turn that reached step 40 is about work already finished.
+      delivery.notePosition(sessionId, turn, step)
     },
     onRewrite: (sessionId) => {
       // Compaction rewrote the surface: buffered transcript and any queued
@@ -1002,6 +1008,7 @@ export function apply(ctx0: Context, config?: unknown): void {
                   predictEnabled: cfg.predictEnabled,
                   predictChars: cfg.predictChars,
                   attachSeverity: cfg.attachSeverity,
+                  attachFreshSteps: cfg.attachFreshSteps,
                   reviewLedgerChars: cfg.reviewLedgerChars,
                 },
               }

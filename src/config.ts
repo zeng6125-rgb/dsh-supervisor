@@ -50,6 +50,12 @@ export interface Config {
    */
   attachSeverity: string
   /**
+   * How many steps behind a turn's frontier a note may be and still be attached.
+   * A review that fires mid-turn describes a moment the agent has since left, so
+   * landing it later makes the agent re-open settled work. 0 disables the gate.
+   */
+  attachFreshSteps: number
+  /**
    * Composer ghost continuation: when a session is idle and its input box is
    * empty, show a short grey guess at what the user will type. Tab accepts it.
    */
@@ -91,6 +97,7 @@ export const Config = z.object({
   attachIntervalSec: z.number().min(0).max(3600).default(180).volatile(),
   wakeGuard: z.boolean().default(true).volatile(),
   attachSeverity: z.string().default('blocker').volatile(),
+  attachFreshSteps: z.number().min(0).max(200).default(12).volatile(),
   reviewLedgerChars: z.number().min(0).max(1000000).default(0).volatile(),
   predictEnabled: z.boolean().default(true).volatile(),
   predictChars: z.number().min(10).max(200).default(40).volatile(),
@@ -124,6 +131,8 @@ const DEFAULTS: Required<Config> = {
   // Only blockers interrupt by default: a note is worth an agent's attention
   // only when ignoring it plainly wastes the work in flight.
   attachSeverity: 'blocker',
+  // One review interval: only the notes about the turn's own tail are spoken.
+  attachFreshSteps: 12,
   // Off: re-sending reviewed deltas buys a prettier hit rate and a bigger bill.
   // Turn it on only to give reviews more context on purpose.
   reviewLedgerChars: 0,
@@ -193,6 +202,7 @@ export function resolveConfig(raw: unknown): Required<Config> {
     attachIntervalSec: num(source.attachIntervalSec, DEFAULTS.attachIntervalSec, 0),
     wakeGuard: bool(source.wakeGuard, DEFAULTS.wakeGuard),
     attachSeverity: mode(source.attachSeverity, DEFAULTS.attachSeverity),
+    attachFreshSteps: num(source.attachFreshSteps, DEFAULTS.attachFreshSteps, 0),
     reviewLedgerChars: num(source.reviewLedgerChars, DEFAULTS.reviewLedgerChars, 0),
     predictEnabled: bool(source.predictEnabled, DEFAULTS.predictEnabled),
     predictChars: num(source.predictChars, DEFAULTS.predictChars, 10),
