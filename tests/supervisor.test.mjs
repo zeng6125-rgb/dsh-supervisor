@@ -1125,6 +1125,29 @@ test('six steps produce one queued note that rides the next turn', async () => {
   assert.equal(d.hasPending(sid), false)
 })
 
+// ── settings surface ─────────────────────────────────────────────────────────
+
+test('every settings field is reachable from a card', async () => {
+  // The settings page renders only the keys a group lists, so a field defined
+  // in FIELDS and forgotten in GROUPS is invisible with no error anywhere —
+  // exactly how `attachSeverity` shipped without a control.
+  const { readFileSync } = await import('node:fs')
+  const source = readFileSync(new URL('../src/client/index.ts', import.meta.url), 'utf8')
+  const fieldsAt = source.indexOf('var FIELDS')
+  const groupsAt = source.indexOf('var GROUPS')
+  assert.ok(fieldsAt > 0 && groupsAt > fieldsAt, 'FIELDS precedes GROUPS')
+
+  const fieldsBlock = source.slice(fieldsAt, groupsAt)
+  const fields = new Set([...fieldsBlock.matchAll(/\{\s*key:\s*'([a-zA-Z]+)'/g)].map((m) => m[1]))
+  assert.ok(fields.size >= 8, 'field list parsed')
+
+  const groupsBlock = source.slice(groupsAt)
+  const listed = new Set([...groupsBlock.matchAll(/'([a-zA-Z]+)'/g)].map((m) => m[1]))
+
+  const orphans = [...fields].filter((key) => !listed.has(key))
+  assert.deepEqual(orphans, [], 'fields missing from every group are unreachable in the UI')
+})
+
 // ── attach policy ────────────────────────────────────────────────────────────
 
 test('only a blocker interrupts by default; a concern stays on the panel', () => {
